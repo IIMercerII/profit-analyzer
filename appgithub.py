@@ -30,6 +30,9 @@ st.sidebar.header("🔧 全局預設參數（用於自動填入新欄位）")
 exchange_rate = st.sidebar.number_input("人民幣匯率 (CNY → TWD)", value=4.6, step=0.01)
 freight_per_kg = st.sidebar.number_input("運費 (台幣 / kg)", value=43, step=1)
 
+# 🔹 新增：進價是否進行匯率換算
+convert_cost_with_exchange_rate = st.sidebar.checkbox("✅ 進價需 × 匯率轉為台幣", value=False, help="若進價已是台幣，請取消勾選")
+
 default_import_tax_pct = st.sidebar.number_input("預設進口稅率 (%)", value=0.0, min_value=0.0, max_value=100.0)
 default_excise_tax_pct = st.sidebar.number_input("預設貨物稅率 (%)", value=0.0, min_value=0.0, max_value=100.0)
 default_input_vat_pct = st.sidebar.number_input("預設進項營業稅率 (%)", value=5.0, min_value=0.0, max_value=100.0)
@@ -40,10 +43,41 @@ packing_method_global = st.sidebar.radio("📦 預設包材費用", ["商品售�
 freight_absorption_method_global = st.sidebar.radio("🚚 預設運費吸收", ["商品售價 × 6%", "固定 60 NT$"], index=0)
 
 # ==============================
+# 側邊欄：異常判定標準（NEW!）
+# ==============================
+st.sidebar.header("⚠️ 異常判定標準（可自訂）")
+abnormal_gross_margin_threshold = st.sidebar.number_input(
+    "毛利率警戒線 (%)", 
+    min_value=0.0, 
+    max_value=100.0, 
+    value=55.0, 
+    step=1.0,
+    help="低於此值即視為異常（若啟用「嚴格模式」）"
+)
+abnormal_net_profit_threshold = st.sidebar.number_input(
+    "稅後淨利率警戒線 (%)", 
+    min_value=0.0, 
+    max_value=100.0, 
+    value=10.0, 
+    step=1.0,
+    help="低於此值即視為異常（若啟用「嚴格模式」）"
+)
+
+abnormal_mode = st.sidebar.radio(
+    "異常判定模式",
+    options=[
+        "僅淨利 < 0 才算異常（保守）",
+        "毛利率 或 淨利率 低於門檻即異常（嚴格）"
+    ],
+    index=1,
+    help="建議新商品用「嚴格」，成熟商品可用「保守」"
+)
+
+# ==============================
 # 上傳檔案
 # ==============================
 st.subheader("📤 請上傳您的商品資料 Excel 檔")
-uploaded_file = st.file_uploader("支援 .xlsx 格式（需包含欄位：品號、品名、零售價、標準進價、單位淨重）", type=["xlsx"])
+uploaded_file = st.file_uploader("支援 .xlsx 格式（建議欄位：品號、品名、零售價、標準進價、單位淨重）", type=["xlsx"])
 
 if uploaded_file is not None:
     try:
@@ -56,28 +90,73 @@ if uploaded_file is not None:
         st.error("⚠️ 檔案內容為空")
         st.stop()
 
+    # ———————— 智能欄位匹配 ————————
     df.columns = df.columns.astype(str).str.strip()
-    required_cols = ['品號', '品名', '零售價', '標準進價']
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        st.error(f"⚠️ 缺少必要欄位：{missing_cols}")
-        st.stop()
 
+    col_mapping = {
+        '品號': ['品號', '商品編號', 'SKU', '貨號', '編號'],
+        '品名': ['品名', '商品名稱', '名稱', '產品名', '商品'],
+        '零售價': ['零售價', '售價', '建議售價', '蝦皮售價', '價格', '定價'],
+        '標準進價': ['標準進價', '進價', '成本價', '採購價', '進貨價', '成本'],
+        '單位淨重': ['單位淨重', '淨重', '重量(kg)', '重量', 'Weight']
+    }
+
+    mapped_cols = {}
+    for target_col, candidates in col_mapping.items():
+        found = None
+        for col in df.columns:
+            if col in candidates:
+                found = col
+                break
+        if found:
+            mapped_cols[target_col] = found
+        else:
+            st.error(f"❌ 找不到對應欄位：**{target_col}**\n\n請確認 Excel 中包含以下任一欄位：\n{candidates}")
+            st.stop()
+
+    df = df.rename(columns={v: k for k, v in mapped_cols.items()})
+
+    # ———————— 調試面板 ————————
+    with st.expander("🔍 點此查看上傳檔案結構（用於排查問題）"):
+        st.write("**📄 已識別的標準欄位：**", list(mapped_cols.keys()))
+        st.write("**📊 原始數據前 3 筆：**")
+        st.dataframe(df[list(mapped_cols.keys())].head(3))
+        st.write("**⚠️ 數值缺失統計：**")
+        missing_counts = {
+            '零售價': df['零售價'].isna().sum(),
+            '標準進價': df['標準進價'].isna().sum(),
+            '單位淨重': df['單位淨重'].isna().sum()
+        }
+        st.write(missing_counts)
+
+    # ———————— 資料清理 ————————
     df['零售價'] = pd.to_numeric(df['零售價'], errors='coerce')
     df['標準進價'] = pd.to_numeric(df['標準進價'], errors='coerce')
+    df['單位淨重'] = pd.to_numeric(df['單位淨重'], errors='coerce').fillna(0.0)
 
     valid_mask = (
-        (~df['品名'].isin(['蝦皮折抵卷', '運費'])) &
+        (~df['品名'].isin(['蝦皮折抵卷', '運費', '折價券'])) &
         (df['零售價'] > 0) &
         (df['標準進價'] > 0)
     )
     df_valid = df[valid_mask].copy()
 
     if df_valid.empty:
-        st.warning("⚠️ 沒有找到有效的商品")
+        st.warning("⚠️ 沒有找到有效的商品（售價與進價需 > 0）")
         st.stop()
 
-    # ———————— 自動新增所有可編輯的成本參數欄位 ————————
+    st.success(f"✅ 成功載入 {len(df_valid)} 筆有效商品！")
+
+    # ———————— 數據合理性警告（僅在需要匯率時檢查） ————————
+    if convert_cost_with_exchange_rate:
+        cost_twd_est = df_valid['標準進價'] * exchange_rate
+        if (df_valid['零售價'] < cost_twd_est).any():
+            st.warning("⚠️ 注意：部分商品「售價 < 進價×匯率」，可能導致虧損！")
+    else:
+        if (df_valid['零售價'] < df_valid['標準進價']).any():
+            st.warning("⚠️ 注意：部分商品「售價 < 進價（已視為台幣）」，可能導致虧損！")
+
+    # ———————— 初始化參數欄位 ————————
     df_valid['包材方式'] = packing_method_global
     df_valid['運費吸收方式'] = freight_absorption_method_global
     df_valid['進口稅率(%)'] = default_import_tax_pct
@@ -86,30 +165,32 @@ if uploaded_file is not None:
     df_valid['重量浮動範圍(%)'] = default_weight_buffer_pct
     df_valid['活動折扣金額(NT$)'] = default_activity_discount
 
-    # 確保 '單位淨重' 是數值型（若無則設為 0）
-    df_valid['單位淨重'] = pd.to_numeric(df_valid['單位淨重'], errors='coerce').fillna(0.0)
-
-    # ———————— 欄位顯示順序：包材 & 運費吸收放到最後 ————————
+    # ———————— 欄位順序 ————————
     desired_order = [
         '品號', '品名', '零售價', '標準進價', '單位淨重',
         '進口稅率(%)', '貨物稅率(%)', '進項營業稅率(%)',
         '重量浮動範圍(%)', '活動折扣金額(NT$)',
-        '包材方式', '運費吸收方式'  # ← 移到最後！
+        '包材方式', '運費吸收方式'
     ]
-    
-    # 只保留存在的欄位（防呆）
     existing_cols = [col for col in desired_order if col in df_valid.columns]
     display_df = df_valid[existing_cols].copy()
 
-    # ———————— 【📋 可編輯表格】 ————————
+    # ———————— 搜尋功能 ————————
+    search_query = st.text_input("🔍 快速搜尋（品號或品名）", placeholder="例如：A1001、保溫杯...")
+    if search_query:
+        mask = (
+            display_df['品號'].astype(str).str.contains(search_query, case=False, na=False) |
+            display_df['品名'].astype(str).str.contains(search_query, case=False, na=False)
+        )
+        display_df = display_df[mask].copy()
+
+    # ———————— 可編輯表格 ————————
     st.subheader("📋 商品成本參數設定（可為每個商品單獨調整）")
     edited_display_df = st.data_editor(
         display_df,
         column_config={
-            # 品號、品名：置頂 + 不可編輯（模擬凍結）
             "品號": st.column_config.TextColumn("品號", disabled=True),
             "品名": st.column_config.TextColumn("品名", disabled=True),
-
             "包材方式": st.column_config.SelectboxColumn(
                 "包材費用",
                 options=["商品售價 × 1%", "固定 10 NT$"],
@@ -143,8 +224,8 @@ if uploaded_file is not None:
             ),
             "重量浮動範圍(%)": st.column_config.NumberColumn(
                 "重量浮動範圍 (%)",
-                min_value=-10.0,      # ← 限制範圍
-                max_value=20.0,       # ← 最大 20%
+                min_value=-10.0,
+                max_value=20.0,
                 step=1.0,
                 format="%.1f"
             ),
@@ -167,25 +248,28 @@ if uploaded_file is not None:
         key="editable_table"
     )
 
-    # ———————— 將編輯結果合併回完整 DataFrame ————————
+    # ———————— 合併結果 ————————
     for col in edited_display_df.columns:
         df_valid[col] = edited_display_df[col]
 
-    # ———————— 核心計算函數（使用每列自己的參數） ————————
+    # ———————— 核心計算函數（含動態異常判定） ————————
     def calculate_profit(row):
         retail_price = float(row['零售價'])
         cost_cny = float(row['標準進價'])
         weight_kg = float(row['單位淨重'])
 
-        # 使用該商品自己的稅率與參數
         import_tax_rate = float(row['進口稅率(%)']) / 100
         excise_tax_rate = float(row['貨物稅率(%)']) / 100
         input_vat_rate = float(row['進項營業稅率(%)']) / 100
         weight_buffer = float(row['重量浮動範圍(%)']) / 100
         activity_discount = float(row['活動折扣金額(NT$)'])
 
-        # 商品成本
-        cost_twd = cost_cny * exchange_rate
+        # 🔹 進價是否 × 匯率？
+        if convert_cost_with_exchange_rate:
+            cost_twd = cost_cny * exchange_rate
+        else:
+            cost_twd = cost_cny  # 直接當作台幣
+
         import_tax = cost_twd * import_tax_rate
         excise_tax = (cost_twd + import_tax) * excise_tax_rate
         input_vat = (cost_twd + import_tax + excise_tax) * input_vat_rate
@@ -193,7 +277,7 @@ if uploaded_file is not None:
         freight_cost = adjusted_weight * freight_per_kg
         product_cost = cost_twd + import_tax + excise_tax + input_vat + freight_cost
 
-        # 營業費用（注意：包材 & 運費吸收從 row 讀取）
+        # 營業費用（行銷與廣告一律使用比例，不再有固定選項）
         packing_cost = retail_price * 0.01 if row['包材方式'] == "商品售價 × 1%" else 10
         bad_rate_cost = retail_price * 0.01
         marketing_cost = retail_price * 0.10
@@ -212,8 +296,23 @@ if uploaded_file is not None:
         net_profit_amount = retail_price - product_cost - operating_cost
         net_profit_rate = net_profit_amount / retail_price if retail_price > 0 else 0
 
-        is_abnormal = (gross_margin < 0.55) or (net_profit_rate < 0.10)
-        action = "建議淘汰" if net_profit_amount < 0 else ("需壓降成本" if is_abnormal else "正常")
+        # ———————— 動態異常判定 ————————
+        gross_margin_pct = gross_margin * 100
+        net_profit_rate_pct = net_profit_rate * 100
+
+        if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
+            is_abnormal = net_profit_amount < 0
+        else:  # 嚴格模式
+            is_abnormal = (gross_margin_pct < abnormal_gross_margin_threshold) or \
+                          (net_profit_rate_pct < abnormal_net_profit_threshold)
+
+        # 行動建議
+        if net_profit_amount < 0:
+            action = "建議淘汰"
+        elif is_abnormal:
+            action = "需壓降成本"
+        else:
+            action = "正常"
 
         return pd.Series({
             '品號': row['品號'],
@@ -222,8 +321,8 @@ if uploaded_file is not None:
             '商品成本(TWD)': round(product_cost, 2),
             '營業費用(TWD)': round(operating_cost, 2),
             '總成本(TWD)': round(product_cost + operating_cost, 2),
-            '毛利率(%)': round(gross_margin * 100, 2),
-            '稅後淨利率(%)': round(net_profit_rate * 100, 2),
+            '毛利率(%)': round(gross_margin_pct, 2),
+            '稅後淨利率(%)': round(net_profit_rate_pct, 2),
             '狀態': '異常' if is_abnormal else '正常',
             '行動建議': action
         })
@@ -233,7 +332,7 @@ if uploaded_file is not None:
     normal_df = result_df[result_df['狀態'] == '正常']
     abnormal_df = result_df[result_df['狀態'] == '異常']
 
-    # ———————— 統計指標 ————————
+    # ———————— 統計指標 + 當前規則提示 ————————
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("✅ 正常商品數", len(normal_df))
@@ -243,22 +342,31 @@ if uploaded_file is not None:
         avg_net = result_df['稅後淨利率(%)'].mean()
         st.metric("平均稅後淨利率", f"{avg_net:.1f}%")
 
-    # ———————— 異常商品清單 ————————
-    st.subheader("⚠️ 異常商品清單（需處理）")
-    st.dataframe(
-        abnormal_df.style.format({
-            '零售價(TWD)': '{:.2f}',
-            '商品成本(TWD)': '{:.2f}',
-            '營業費用(TWD)': '{:.2f}',
-            '總成本(TWD)': '{:.2f}',
-            '毛利率(%)': '{:.2f}%',
-            '稅後淨利率(%)': '{:.2f}%'
-        }).background_gradient(cmap='RdYlGn_r', subset=['毛利率(%)', '稅後淨利率(%)']),
-        use_container_width=True,
-        height=400
-    )
+    # ———————— 顯示當前判定規則 ————————
+    if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
+        st.caption("📌 當前異常判定：僅「淨利金額 < 0」的商品會被標記為異常")
+    else:
+        st.caption(f"📌 當前異常判定：毛利率 < {abnormal_gross_margin_threshold}% 或 稅後淨利率 < {abnormal_net_profit_threshold}%")
 
-    # ———————— 正常商品清單（摺疊） ————————
+    # ———————— 異常商品清單 ————————
+    if not abnormal_df.empty:
+        st.subheader("⚠️ 異常商品清單（依當前標準）")
+        st.dataframe(
+            abnormal_df.style.format({
+                '零售價(TWD)': '{:.2f}',
+                '商品成本(TWD)': '{:.2f}',
+                '營業費用(TWD)': '{:.2f}',
+                '總成本(TWD)': '{:.2f}',
+                '毛利率(%)': '{:.2f}%',
+                '稅後淨利率(%)': '{:.2f}%'
+            }).background_gradient(cmap='RdYlGn_r', subset=['毛利率(%)', '稅後淨利率(%)']),
+            use_container_width=True,
+            height=400
+        )
+    else:
+        st.success("🎉 所有商品均符合當前標準！無異常項目。")
+
+    # ———————— 正常商品清單 ————————
     with st.expander("✅ 正常商品清單"):
         st.dataframe(
             normal_df.style.format({
@@ -287,7 +395,7 @@ if uploaded_file is not None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # ———————— 數據可視化（最下方！） ————————
+    # ———————— 數據可視化 ————————
     st.subheader("📈 商品獲利能力可視化分析")
 
     viz_df = result_df.merge(
@@ -303,11 +411,9 @@ if uploaded_file is not None:
         col_a, col_b = st.columns(2)
         with col_a:
             fig_gross = px.histogram(viz_df, x='毛利率(%)', nbins=20, title="毛利率分佈", color_discrete_sequence=['#636EFA'])
-            fig_gross.add_vline(x=55, line_dash="dash", line_color="red", annotation_text="警戒線 55%")
             st.plotly_chart(fig_gross, use_container_width=True)
         with col_b:
             fig_net = px.histogram(viz_df, x='稅後淨利率(%)', nbins=20, title="稅後淨利率分佈", color_discrete_sequence=['#EF553B'])
-            fig_net.add_vline(x=10, line_dash="dash", line_color="red", annotation_text="警戒線 10%")
             st.plotly_chart(fig_net, use_container_width=True)
 
     with tab2:
@@ -322,7 +428,6 @@ if uploaded_file is not None:
             title="售價 vs 稅後淨利率（氣泡大小 = 售價）",
             color_discrete_map={'正常': '#00CC96', '異常': '#FF6692'}
         )
-        fig_scatter.add_hline(y=10, line_dash="dash", line_color="red")
         fig_scatter.update_layout(xaxis_title="零售價 (TWD)", yaxis_title="稅後淨利率 (%)")
         st.plotly_chart(fig_scatter, use_container_width=True)
 
@@ -336,4 +441,4 @@ if uploaded_file is not None:
         st.plotly_chart(fig_bar, use_container_width=True)
 
 else:
-    st.info("💡 請上傳 Excel 檔以開始分析（只需包含：品號、品名、零售價、標準進價、單位淨重）")
+    st.info("💡 請上傳 Excel 檔以開始分析（建議欄位：品號、品名、零售價、標準進價、單位淨重）")
