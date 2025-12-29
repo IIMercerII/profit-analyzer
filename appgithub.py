@@ -23,27 +23,7 @@ st.markdown("""
 """)
 
 # ==============================
-# 側邊欄：全局預設參數
-# ==============================
-st.sidebar.header("🔧 全局預設參數（用於自動填入新欄位）")
-
-exchange_rate = st.sidebar.number_input("人民幣匯率 (CNY → TWD)", value=4.6, step=0.01)
-freight_per_kg = st.sidebar.number_input("運費 (台幣 / kg)", value=43, step=1)
-
-# 🔹 新增：進價是否進行匯率換算
-convert_cost_with_exchange_rate = st.sidebar.checkbox("✅ 進價需 × 匯率轉為台幣", value=False, help="若進價已是台幣，請取消勾選")
-
-default_import_tax_pct = st.sidebar.number_input("預設進口稅率 (%)", value=0.0, min_value=0.0, max_value=100.0)
-default_excise_tax_pct = st.sidebar.number_input("預設貨物稅率 (%)", value=0.0, min_value=0.0, max_value=100.0)
-default_input_vat_pct = st.sidebar.number_input("預設進項營業稅率 (%)", value=5.0, min_value=0.0, max_value=100.0)
-default_weight_buffer_pct = st.sidebar.slider("預設重量浮動範圍 (%)", min_value=-10, max_value=20, value=20)
-default_activity_discount = st.sidebar.number_input("預設活動折扣金額 (NT$)", value=0, step=1)
-
-packing_method_global = st.sidebar.radio("📦 預設包材費用", ["商品售價 × 1%", "固定 10 NT$"], index=0)
-freight_absorption_method_global = st.sidebar.radio("🚚 預設運費吸收", ["商品售價 × 6%", "固定 60 NT$"], index=0)
-
-# ==============================
-# 側邊欄：異常判定標準（NEW!）
+# 側邊欄：異常判定標準（移至最上方）
 # ==============================
 st.sidebar.header("⚠️ 異常判定標準（可自訂）")
 abnormal_gross_margin_threshold = st.sidebar.number_input(
@@ -72,6 +52,30 @@ abnormal_mode = st.sidebar.radio(
     index=1,
     help="建議新商品用「嚴格」，成熟商品可用「保守」"
 )
+
+# ==============================
+# 側邊欄：全局預設參數
+# ==============================
+st.sidebar.header("🔧 全局預設參數（用於自動填入新欄位）")
+
+exchange_rate = st.sidebar.number_input("人民幣匯率 (CNY → TWD)", value=4.6, step=0.01)
+
+convert_cost_with_exchange_rate = st.sidebar.checkbox(
+    "✅ 進價需 × 匯率轉為台幣", 
+    value=False,
+    help="若進價已是台幣，請取消勾選"
+)
+
+freight_per_kg = st.sidebar.number_input("運費 (台幣 / kg)", value=43, step=1)
+
+default_import_tax_pct = st.sidebar.number_input("預設進口稅率 (%)", value=0.0, min_value=0.0, max_value=100.0)
+default_excise_tax_pct = st.sidebar.number_input("預設貨物稅率 (%)", value=0.0, min_value=0.0, max_value=100.0)
+default_input_vat_pct = st.sidebar.number_input("預設進項營業稅率 (%)", value=5.0, min_value=0.0, max_value=100.0)
+default_weight_buffer_pct = st.sidebar.slider("預設重量浮動範圍 (%)", min_value=-10, max_value=20, value=20)
+default_activity_discount = st.sidebar.number_input("預設活動折扣金額 (NT$)", value=0, step=1)
+
+packing_method_global = st.sidebar.radio("📦 預設包材費用", ["商品售價 × 1%", "固定 10 NT$"], index=0)
+freight_absorption_method_global = st.sidebar.radio("🚚 預設運費吸收", ["商品售價 × 6%", "固定 60 NT$"], index=0)
 
 # ==============================
 # 上傳檔案
@@ -136,25 +140,26 @@ if uploaded_file is not None:
 
     valid_mask = (
         (~df['品名'].isin(['蝦皮折抵卷', '運費', '折價券'])) &
-        (df['零售價'] > 0) &
-        (df['標準進價'] > 0)
+        (df['標準進價'] > 0)  # 注意：這裡允許零售價為 NaN 或 ≤0
     )
     df_valid = df[valid_mask].copy()
 
     if df_valid.empty:
-        st.warning("⚠️ 沒有找到有效的商品（售價與進價需 > 0）")
+        st.warning("⚠️ 沒有找到有效的商品（進價需 > 0）")
         st.stop()
 
-    st.success(f"✅ 成功載入 {len(df_valid)} 筆有效商品！")
+    st.success(f"✅ 成功載入 {len(df_valid)} 筆有效商品（含售價缺失或為0的商品）！")
 
-    # ———————— 數據合理性警告（僅在需要匯率時檢查） ————————
-    if convert_cost_with_exchange_rate:
-        cost_twd_est = df_valid['標準進價'] * exchange_rate
-        if (df_valid['零售價'] < cost_twd_est).any():
-            st.warning("⚠️ 注意：部分商品「售價 < 進價×匯率」，可能導致虧損！")
-    else:
-        if (df_valid['零售價'] < df_valid['標準進價']).any():
-            st.warning("⚠️ 注意：部分商品「售價 < 進價（已視為台幣）」，可能導致虧損！")
+    # ———————— 數據合理性警告（僅針對有售價且 >0 的商品）——————
+    has_positive_price = df_valid['零售價'] > 0
+    if has_positive_price.any():
+        if convert_cost_with_exchange_rate:
+            cost_twd_est = df_valid.loc[has_positive_price, '標準進價'] * exchange_rate
+            if (df_valid.loc[has_positive_price, '零售價'] < cost_twd_est).any():
+                st.warning("⚠️ 注意：部分商品「售價 < 進價×匯率」，可能導致虧損！")
+        else:
+            if (df_valid.loc[has_positive_price, '零售價'] < df_valid.loc[has_positive_price, '標準進價']).any():
+                st.warning("⚠️ 注意：部分商品「售價 < 進價（已視為台幣）」，可能導致虧損！")
 
     # ———————— 初始化參數欄位 ————————
     df_valid['包材方式'] = packing_method_global
@@ -252,7 +257,95 @@ if uploaded_file is not None:
     for col in edited_display_df.columns:
         df_valid[col] = edited_display_df[col]
 
-    # ———————— 核心計算函數（含動態異常判定） ————————
+    # ———————— 新增功能：為「無售價或售價≤0但有進價」商品推薦售價 ————————
+    missing_price_mask = (
+        ((df_valid['零售價'].isna()) | (df_valid['零售價'] <= 0)) &
+        (df_valid['標準進價'] > 0)
+    )
+
+    if missing_price_mask.any():
+        st.subheader("💡 建議售價（基於當前異常判定標準）")
+        
+        df_missing = df_valid[missing_price_mask].copy()
+        
+        def recommend_price(row):
+            cost_cny = float(row['標準進價'])
+            weight_kg = float(row['單位淨重'])
+
+            import_tax_rate = float(row['進口稅率(%)']) / 100
+            excise_tax_rate = float(row['貨物稅率(%)']) / 100
+            input_vat_rate = float(row['進項營業稅率(%)']) / 100
+            weight_buffer = float(row['重量浮動範圍(%)']) / 100
+            activity_discount = float(row['活動折扣金額(NT$)'])
+
+            # 商品成本計算
+            if convert_cost_with_exchange_rate:
+                cost_twd = cost_cny * exchange_rate
+            else:
+                cost_twd = cost_cny
+
+            import_tax = cost_twd * import_tax_rate
+            excise_tax = (cost_twd + import_tax) * excise_tax_rate
+            input_vat = (cost_twd + import_tax + excise_tax) * input_vat_rate
+            adjusted_weight = weight_kg * (1 + weight_buffer)
+            freight_cost = adjusted_weight * freight_per_kg
+            product_cost = cost_twd + import_tax + excise_tax + input_vat + freight_cost
+
+            # 營業費用比例估算（固定費用轉換為比例）
+            packing_ratio = 0.01 if row['包材方式'] == "商品售價 × 1%" else 10 / 1000  # 假設售價~1000
+            freight_absorption_ratio = 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60 / 1000
+            total_opex_ratio = (
+                packing_ratio + 0.01 + 0.10 + 0.10 + 0.10 + 0.05 + 0.02 + freight_absorption_ratio
+            )
+
+            if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
+                denom = 1 - total_opex_ratio
+                if denom <= 0:
+                    return None
+                min_price = (product_cost + activity_discount) / denom
+            else:
+                # 毛利率約束
+                gross_min = product_cost / (1 - abnormal_gross_margin_threshold / 100)
+                # 淨利率約束
+                net_denom = 1 - abnormal_net_profit_threshold / 100 - total_opex_ratio
+                if net_denom <= 0:
+                    net_min = float('inf')
+                else:
+                    net_min = (product_cost + activity_discount) / net_denom
+                min_price = max(gross_min, net_min)
+
+            return round(max(min_price, 0), 2)
+
+        df_missing['建議售價(TWD)'] = df_missing.apply(recommend_price, axis=1)
+        df_missing = df_missing.dropna(subset=['建議售價(TWD)'])
+
+        if not df_missing.empty:
+            display_recommend = df_missing[['品號', '品名', '標準進價', '單位淨重', '建議售價(TWD)']].copy()
+            st.dataframe(display_recommend, use_container_width=True)
+            
+            output_rec = io.BytesIO()
+            with pd.ExcelWriter(output_rec, engine='openpyxl') as writer:
+                display_recommend.to_excel(writer, sheet_name="建議售價", index=False)
+            st.download_button(
+                label="⬇️ 下載建議售價清單",
+                data=output_rec.getvalue(),
+                file_name=f"建議售價_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("⚠️ 無法為缺失售價的商品計算建議價格（參數導致無解）")
+    else:
+        st.info("✅ 所有商品均有有效售價（>0），無需推薦。")
+
+    # ———————— 主分析：僅處理有售價且 >0 的商品 ————————
+    has_price_final = (df_valid['零售價'].notna()) & (df_valid['零售價'] > 0)
+    df_for_analysis = df_valid[has_price_final].copy()
+
+    if df_for_analysis.empty:
+        st.warning("⚠️ 沒有具備有效售價（>0）的商品，無法進行獲利分析。")
+        st.stop()
+
+    # ———————— 核心計算函數 ————————
     def calculate_profit(row):
         retail_price = float(row['零售價'])
         cost_cny = float(row['標準進價'])
@@ -264,11 +357,10 @@ if uploaded_file is not None:
         weight_buffer = float(row['重量浮動範圍(%)']) / 100
         activity_discount = float(row['活動折扣金額(NT$)'])
 
-        # 🔹 進價是否 × 匯率？
         if convert_cost_with_exchange_rate:
             cost_twd = cost_cny * exchange_rate
         else:
-            cost_twd = cost_cny  # 直接當作台幣
+            cost_twd = cost_cny
 
         import_tax = cost_twd * import_tax_rate
         excise_tax = (cost_twd + import_tax) * excise_tax_rate
@@ -277,7 +369,6 @@ if uploaded_file is not None:
         freight_cost = adjusted_weight * freight_per_kg
         product_cost = cost_twd + import_tax + excise_tax + input_vat + freight_cost
 
-        # 營業費用（行銷與廣告一律使用比例，不再有固定選項）
         packing_cost = retail_price * 0.01 if row['包材方式'] == "商品售價 × 1%" else 10
         bad_rate_cost = retail_price * 0.01
         marketing_cost = retail_price * 0.10
@@ -296,17 +387,15 @@ if uploaded_file is not None:
         net_profit_amount = retail_price - product_cost - operating_cost
         net_profit_rate = net_profit_amount / retail_price if retail_price > 0 else 0
 
-        # ———————— 動態異常判定 ————————
         gross_margin_pct = gross_margin * 100
         net_profit_rate_pct = net_profit_rate * 100
 
         if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
             is_abnormal = net_profit_amount < 0
-        else:  # 嚴格模式
+        else:
             is_abnormal = (gross_margin_pct < abnormal_gross_margin_threshold) or \
                           (net_profit_rate_pct < abnormal_net_profit_threshold)
 
-        # 行動建議
         if net_profit_amount < 0:
             action = "建議淘汰"
         elif is_abnormal:
@@ -327,12 +416,11 @@ if uploaded_file is not None:
             '行動建議': action
         })
 
-    # ———————— 執行計算 ————————
-    result_df = df_valid.apply(calculate_profit, axis=1)
+    result_df = df_for_analysis.apply(calculate_profit, axis=1)
     normal_df = result_df[result_df['狀態'] == '正常']
     abnormal_df = result_df[result_df['狀態'] == '異常']
 
-    # ———————— 統計指標 + 當前規則提示 ————————
+    # ———————— 統計指標 + 規則提示 ————————
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("✅ 正常商品數", len(normal_df))
@@ -342,7 +430,6 @@ if uploaded_file is not None:
         avg_net = result_df['稅後淨利率(%)'].mean()
         st.metric("平均稅後淨利率", f"{avg_net:.1f}%")
 
-    # ———————— 顯示當前判定規則 ————————
     if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
         st.caption("📌 當前異常判定：僅「淨利金額 < 0」的商品會被標記為異常")
     else:
@@ -399,7 +486,7 @@ if uploaded_file is not None:
     st.subheader("📈 商品獲利能力可視化分析")
 
     viz_df = result_df.merge(
-        df_valid[['品號', '零售價']],
+        df_for_analysis[['品號', '零售價']],
         on='品號',
         how='left'
     )
