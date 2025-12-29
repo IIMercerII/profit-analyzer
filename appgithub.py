@@ -23,7 +23,7 @@ st.markdown("""
 """)
 
 # ==============================
-# 側邊欄：異常判定標準（移至最上方）
+# 側邊欄：異常判定標準
 # ==============================
 st.sidebar.header("⚠️ 異常判定標準（可自訂）")
 abnormal_gross_margin_threshold = st.sidebar.number_input(
@@ -120,19 +120,6 @@ if uploaded_file is not None:
 
     df = df.rename(columns={v: k for k, v in mapped_cols.items()})
 
-    # ———————— 調試面板 ————————
-    with st.expander("🔍 點此查看上傳檔案結構（用於排查問題）"):
-        st.write("**📄 已識別的標準欄位：**", list(mapped_cols.keys()))
-        st.write("**📊 原始數據前 3 筆：**")
-        st.dataframe(df[list(mapped_cols.keys())].head(3))
-        st.write("**⚠️ 數值缺失統計：**")
-        missing_counts = {
-            '零售價': df['零售價'].isna().sum(),
-            '標準進價': df['標準進價'].isna().sum(),
-            '單位淨重': df['單位淨重'].isna().sum()
-        }
-        st.write(missing_counts)
-
     # ———————— 資料清理 ————————
     df['零售價'] = pd.to_numeric(df['零售價'], errors='coerce')
     df['標準進價'] = pd.to_numeric(df['標準進價'], errors='coerce')
@@ -140,7 +127,7 @@ if uploaded_file is not None:
 
     valid_mask = (
         (~df['品名'].isin(['蝦皮折抵卷', '運費', '折價券'])) &
-        (df['標準進價'] > 0)  # 注意：這裡允許零售價為 NaN 或 ≤0
+        (df['標準進價'] > 0)
     )
     df_valid = df[valid_mask].copy()
 
@@ -150,7 +137,7 @@ if uploaded_file is not None:
 
     st.success(f"✅ 成功載入 {len(df_valid)} 筆有效商品（含售價缺失或為0的商品）！")
 
-    # ———————— 數據合理性警告（僅針對有售價且 >0 的商品）——————
+    # ———————— 數據合理性警告 ————————
     has_positive_price = df_valid['零售價'] > 0
     if has_positive_price.any():
         if convert_cost_with_exchange_rate:
@@ -253,89 +240,51 @@ if uploaded_file is not None:
         key="editable_table"
     )
 
+    # ———————— 追蹤最近編輯的商品（無輔助欄位）——————
+    if 'last_edited_skus' not in st.session_state:
+        st.session_state.last_edited_skus = set()
+
+    try:
+        editable_cols = [
+            '進口稅率(%)', '貨物稅率(%)', '進項營業稅率(%)',
+            '重量浮動範圍(%)', '活動折扣金額(NT$)',
+            '包材方式', '運費吸收方式'
+        ]
+        
+        # 確保 df_valid 有這些欄位
+        for col in editable_cols:
+            if col not in df_valid.columns:
+                df_valid[col] = edited_display_df[col].iloc[0]
+
+        # 安全合併比對變更
+        merged = pd.merge(
+            edited_display_df[['品號'] + editable_cols],
+            df_valid[['品號'] + editable_cols],
+            on='品號',
+            suffixes=('_new', '_old'),
+            how='inner'
+        )
+
+        def has_changed(row):
+            for col in editable_cols:
+                new_val = row[f'{col}_new']
+                old_val = row[f'{col}_old']
+                if pd.isna(new_val) and pd.isna(old_val):
+                    continue
+                if new_val != old_val:
+                    return True
+            return False
+
+        merged['changed'] = merged.apply(has_changed, axis=1)
+        changed_skus = merged[merged['changed']]['品號'].tolist()
+        st.session_state.last_edited_skus = set(changed_skus)
+
+    except Exception:
+        st.session_state.last_edited_skus = set()
+
     # ———————— 合併結果 ————————
     for col in edited_display_df.columns:
         df_valid[col] = edited_display_df[col]
-
-    # ———————— 新增功能：為「無售價或售價≤0但有進價」商品推薦售價 ————————
-    missing_price_mask = (
-        ((df_valid['零售價'].isna()) | (df_valid['零售價'] <= 0)) &
-        (df_valid['標準進價'] > 0)
-    )
-
-    if missing_price_mask.any():
-        st.subheader("💡 建議售價（基於當前異常判定標準）")
-        
-        df_missing = df_valid[missing_price_mask].copy()
-        
-        def recommend_price(row):
-            cost_cny = float(row['標準進價'])
-            weight_kg = float(row['單位淨重'])
-
-            import_tax_rate = float(row['進口稅率(%)']) / 100
-            excise_tax_rate = float(row['貨物稅率(%)']) / 100
-            input_vat_rate = float(row['進項營業稅率(%)']) / 100
-            weight_buffer = float(row['重量浮動範圍(%)']) / 100
-            activity_discount = float(row['活動折扣金額(NT$)'])
-
-            # 商品成本計算
-            if convert_cost_with_exchange_rate:
-                cost_twd = cost_cny * exchange_rate
-            else:
-                cost_twd = cost_cny
-
-            import_tax = cost_twd * import_tax_rate
-            excise_tax = (cost_twd + import_tax) * excise_tax_rate
-            input_vat = (cost_twd + import_tax + excise_tax) * input_vat_rate
-            adjusted_weight = weight_kg * (1 + weight_buffer)
-            freight_cost = adjusted_weight * freight_per_kg
-            product_cost = cost_twd + import_tax + excise_tax + input_vat + freight_cost
-
-            # 營業費用比例估算（固定費用轉換為比例）
-            packing_ratio = 0.01 if row['包材方式'] == "商品售價 × 1%" else 10 / 1000  # 假設售價~1000
-            freight_absorption_ratio = 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60 / 1000
-            total_opex_ratio = (
-                packing_ratio + 0.01 + 0.10 + 0.10 + 0.10 + 0.05 + 0.02 + freight_absorption_ratio
-            )
-
-            if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
-                denom = 1 - total_opex_ratio
-                if denom <= 0:
-                    return None
-                min_price = (product_cost + activity_discount) / denom
-            else:
-                # 毛利率約束
-                gross_min = product_cost / (1 - abnormal_gross_margin_threshold / 100)
-                # 淨利率約束
-                net_denom = 1 - abnormal_net_profit_threshold / 100 - total_opex_ratio
-                if net_denom <= 0:
-                    net_min = float('inf')
-                else:
-                    net_min = (product_cost + activity_discount) / net_denom
-                min_price = max(gross_min, net_min)
-
-            return round(max(min_price, 0), 2)
-
-        df_missing['建議售價(TWD)'] = df_missing.apply(recommend_price, axis=1)
-        df_missing = df_missing.dropna(subset=['建議售價(TWD)'])
-
-        if not df_missing.empty:
-            display_recommend = df_missing[['品號', '品名', '標準進價', '單位淨重', '建議售價(TWD)']].copy()
-            st.dataframe(display_recommend, use_container_width=True)
-            
-            output_rec = io.BytesIO()
-            with pd.ExcelWriter(output_rec, engine='openpyxl') as writer:
-                display_recommend.to_excel(writer, sheet_name="建議售價", index=False)
-            st.download_button(
-                label="⬇️ 下載建議售價清單",
-                data=output_rec.getvalue(),
-                file_name=f"建議售價_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("⚠️ 無法為缺失售價的商品計算建議價格（參數導致無解）")
-    else:
-        st.info("✅ 所有商品均有有效售價（>0），無需推薦。")
 
     # ———————— 主分析：僅處理有售價且 >0 的商品 ————————
     has_price_final = (df_valid['零售價'].notna()) & (df_valid['零售價'] > 0)
@@ -417,8 +366,50 @@ if uploaded_file is not None:
         })
 
     result_df = df_for_analysis.apply(calculate_profit, axis=1)
-    normal_df = result_df[result_df['狀態'] == '正常']
-    abnormal_df = result_df[result_df['狀態'] == '異常']
+
+    # ———————— 新增：標記並排序最近編輯商品（不新增欄位）——————
+    # 我們在排序時直接用 set 判斷，不加新欄
+    last_edited_set = st.session_state.last_edited_skus
+
+    # 自訂排序鍵：編輯過的放前面
+    def sort_key(row):
+        return (0 if row['品號'] in last_edited_set else 1, row.name)
+
+    result_df['_sort_key'] = result_df.apply(sort_key, axis=1)
+    result_df = result_df.sort_values('_sort_key').drop(columns=['_sort_key'])
+
+    # ———————— 分割正常/異常 ————————
+    abnormal_full = result_df[result_df['狀態'] == '異常']
+    normal_full = result_df[result_df['狀態'] == '正常']
+
+    # ———————— 過濾開關 ————————
+    show_only_edited = False
+    if last_edited_set:
+        show_only_edited = st.checkbox("✅ 只顯示最近編輯過的商品結果", value=False)
+        if show_only_edited:
+            st.caption(f"📌 僅顯示 {len(last_edited_set)} 筆已編輯商品")
+            abnormal_df = abnormal_full[abnormal_full['品號'].isin(last_edited_set)]
+            normal_df = normal_full[normal_full['品號'].isin(last_edited_set)]
+        else:
+            abnormal_df = abnormal_full
+            normal_df = normal_full
+    else:
+        abnormal_df = abnormal_full
+        normal_df = normal_full
+
+    # ———————— 高亮函數：僅高亮「品號」與「品名」——————
+    def highlight_sku_name(row):
+        if row['品號'] in st.session_state.last_edited_skus:
+            styles = []
+            for col in row.index:
+                if col in ['品號', '品名']:
+                    # 背景淺黃 + 黑色文字
+                    styles.append('background-color: #FFF3B0; color: #000000; font-weight: bold')
+                else:
+                    styles.append('')
+            return styles
+        else:
+            return ['' for _ in row.index]
 
     # ———————— 統計指標 + 規則提示 ————————
     col1, col2, col3 = st.columns(3)
@@ -438,41 +429,47 @@ if uploaded_file is not None:
     # ———————— 異常商品清單 ————————
     if not abnormal_df.empty:
         st.subheader("⚠️ 異常商品清單（依當前標準）")
-        st.dataframe(
-            abnormal_df.style.format({
+        styled_abnormal = (
+            abnormal_df.style.apply(highlight_sku_name, axis=1)
+            .format({
                 '零售價(TWD)': '{:.2f}',
                 '商品成本(TWD)': '{:.2f}',
                 '營業費用(TWD)': '{:.2f}',
                 '總成本(TWD)': '{:.2f}',
                 '毛利率(%)': '{:.2f}%',
                 '稅後淨利率(%)': '{:.2f}%'
-            }).background_gradient(cmap='RdYlGn_r', subset=['毛利率(%)', '稅後淨利率(%)']),
-            use_container_width=True,
-            height=400
+            })
+            .background_gradient(cmap='RdYlGn_r', subset=['毛利率(%)', '稅後淨利率(%)'])
         )
+        st.dataframe(styled_abnormal, use_container_width=True, height=400, hide_index=True)
     else:
         st.success("🎉 所有商品均符合當前標準！無異常項目。")
 
     # ———————— 正常商品清單 ————————
     with st.expander("✅ 正常商品清單"):
-        st.dataframe(
-            normal_df.style.format({
+        styled_normal = (
+            normal_df.style.apply(highlight_sku_name, axis=1)
+            .format({
                 '零售價(TWD)': '{:.2f}',
                 '商品成本(TWD)': '{:.2f}',
                 '營業費用(TWD)': '{:.2f}',
                 '總成本(TWD)': '{:.2f}',
                 '毛利率(%)': '{:.2f}%',
                 '稅後淨利率(%)': '{:.2f}%'
-            }).background_gradient(cmap='RdYlGn', subset=['毛利率(%)', '稅後淨利率(%)']),
-            use_container_width=True
+            })
+            .background_gradient(cmap='RdYlGn', subset=['毛利率(%)', '稅後淨利率(%)'])
         )
+        st.dataframe(styled_normal, use_container_width=True, hide_index=True)
 
     # ———————— 匯出報告 ————————
     st.subheader("📥 匯出完整分析報告")
+    abnormal_export = result_df[result_df['狀態'] == '異常']
+    normal_export = result_df[result_df['狀態'] == '正常']
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        abnormal_df.to_excel(writer, sheet_name="異常商品", index=False)
-        normal_df.to_excel(writer, sheet_name="正常商品", index=False)
+        abnormal_export.to_excel(writer, sheet_name="異常商品", index=False)
+        normal_export.to_excel(writer, sheet_name="正常商品", index=False)
         df_valid.to_excel(writer, sheet_name="商品設定", index=False)
 
     st.download_button(
@@ -482,14 +479,86 @@ if uploaded_file is not None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
+    # ———————— 建議售價區塊 ————————
+    missing_price_mask = (
+        ((df_valid['零售價'].isna()) | (df_valid['零售價'] <= 0)) &
+        (df_valid['標準進價'] > 0)
+    )
+
+    if missing_price_mask.any():
+        st.subheader("💡 建議售價（基於當前異常判定標準）")
+        
+        df_missing = df_valid[missing_price_mask].copy()
+        
+        def recommend_price(row):
+            cost_cny = float(row['標準進價'])
+            weight_kg = float(row['單位淨重'])
+
+            import_tax_rate = float(row['進口稅率(%)']) / 100
+            excise_tax_rate = float(row['貨物稅率(%)']) / 100
+            input_vat_rate = float(row['進項營業稅率(%)']) / 100
+            weight_buffer = float(row['重量浮動範圍(%)']) / 100
+            activity_discount = float(row['活動折扣金額(NT$)'])
+
+            if convert_cost_with_exchange_rate:
+                cost_twd = cost_cny * exchange_rate
+            else:
+                cost_twd = cost_cny
+
+            import_tax = cost_twd * import_tax_rate
+            excise_tax = (cost_twd + import_tax) * excise_tax_rate
+            input_vat = (cost_twd + import_tax + excise_tax) * input_vat_rate
+            adjusted_weight = weight_kg * (1 + weight_buffer)
+            freight_cost = adjusted_weight * freight_per_kg
+            product_cost = cost_twd + import_tax + excise_tax + input_vat + freight_cost
+
+            packing_ratio = 0.01 if row['包材方式'] == "商品售價 × 1%" else 10 / 1000
+            freight_absorption_ratio = 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60 / 1000
+            total_opex_ratio = (
+                packing_ratio + 0.01 + 0.10 + 0.10 + 0.10 + 0.05 + 0.02 + freight_absorption_ratio
+            )
+
+            if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
+                denom = 1 - total_opex_ratio
+                if denom <= 0:
+                    return None
+                min_price = (product_cost + activity_discount) / denom
+            else:
+                gross_min = product_cost / (1 - abnormal_gross_margin_threshold / 100)
+                net_denom = 1 - abnormal_net_profit_threshold / 100 - total_opex_ratio
+                if net_denom <= 0:
+                    net_min = float('inf')
+                else:
+                    net_min = (product_cost + activity_discount) / net_denom
+                min_price = max(gross_min, net_min)
+
+            return round(max(min_price, 0), 2)
+
+        df_missing['建議售價(TWD)'] = df_missing.apply(recommend_price, axis=1)
+        df_missing = df_missing.dropna(subset=['建議售價(TWD)'])
+
+        if not df_missing.empty:
+            display_recommend = df_missing[['品號', '品名', '標準進價', '單位淨重', '建議售價(TWD)']].copy()
+            st.dataframe(display_recommend, use_container_width=True, hide_index=True)
+            
+            output_rec = io.BytesIO()
+            with pd.ExcelWriter(output_rec, engine='openpyxl') as writer:
+                display_recommend.to_excel(writer, sheet_name="建議售價", index=False)
+            st.download_button(
+                label="⬇️ 下載建議售價清單",
+                data=output_rec.getvalue(),
+                file_name=f"建議售價_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.info("⚠️ 無法為缺失售價的商品計算建議價格（參數導致無解）")
+    else:
+        st.info("✅ 所有商品均有有效售價（>0），無需推薦。")
+
     # ———————— 數據可視化 ————————
     st.subheader("📈 商品獲利能力可視化分析")
 
-    viz_df = result_df.merge(
-        df_for_analysis[['品號', '零售價']],
-        on='品號',
-        how='left'
-    )
+    viz_df = result_df.copy()
     viz_df['淨利金額'] = viz_df['零售價(TWD)'] - viz_df['總成本(TWD)']
 
     tab1, tab2, tab3 = st.tabs(["📊 利潤分佈", "🔍 售價 vs 淨利率", "🏆 賺/賠商品排行"])
