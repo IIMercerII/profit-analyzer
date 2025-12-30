@@ -327,14 +327,14 @@ if uploaded_file is not None:
         marketing_cost = retail_price * 0.10
         ad_cost = retail_price * 0.10
         shopee_fee = retail_price * 0.10
-        # output_vat 已從收入中剝離，此處「不應再扣」！
+        # output_vat 已從收入中剝離。
         income_tax = retail_price * 0.02
         freight_absorption = retail_price * 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60
 
         operating_cost = (
             packing_cost + bad_rate_cost + marketing_cost + ad_cost +
             shopee_fee + income_tax + activity_discount + freight_absorption
-            # 注意：已移除 output_vat
+            # 已移除 output_vat
         )
 
         gross_margin = (retail_price - product_cost) / retail_price if retail_price > 0 else 0
@@ -527,17 +527,20 @@ if uploaded_file is not None:
                 denom = 1 - total_opex_ratio
                 if denom <= 0:
                     return None
-                min_price = (product_cost + activity_discount) / denom
+                min_price_excl_vat = (product_cost + activity_discount) / denom
             else:
-                gross_min = product_cost / (1 - abnormal_gross_margin_threshold / 100)
+                gross_min_excl_vat = product_cost / (1 - abnormal_gross_margin_threshold / 100)
                 net_denom = 1 - abnormal_net_profit_threshold / 100 - total_opex_ratio
                 if net_denom <= 0:
-                    net_min = float('inf')
+                    net_min_excl_vat = float('inf')
                 else:
-                    net_min = (product_cost + activity_discount) / net_denom
-                min_price = max(gross_min, net_min)
+                    net_min_excl_vat = (product_cost + activity_discount) / net_denom
+                min_price_excl_vat = max(gross_min_excl_vat, net_min_excl_vat)
 
-            return round(max(min_price, 0), 2)
+            # ✅ 關鍵修正：轉為含稅建議售價（對外標價）
+            min_price_incl_vat = min_price_excl_vat * 1.05
+
+            return round(max(min_price_incl_vat, 0), 2)
 
         df_missing['建議售價(TWD)'] = df_missing.apply(recommend_price, axis=1)
         df_missing = df_missing.dropna(subset=['建議售價(TWD)'])
@@ -609,20 +612,20 @@ if uploaded_file is not None:
                 denom = 1 - total_opex_ratio
                 if denom <= 0:
                     return None
-                min_price = (product_cost + activity_discount) / denom
+                min_price_excl_vat = (product_cost + activity_discount) / denom
             else:
-                # 毛利率門檻
-                gross_min = product_cost / (1 - abnormal_gross_margin_threshold / 100)
-                # 淨利率門檻：retail_price - product_cost - opex >= retail_price * net_threshold
-                # => retail_price * (1 - net_threshold - opex_ratio) >= product_cost + discount
+                gross_min_excl_vat = product_cost / (1 - abnormal_gross_margin_threshold / 100)
                 net_denom = 1 - abnormal_net_profit_threshold / 100 - total_opex_ratio
                 if net_denom <= 0:
-                    net_min = float('inf')
+                    net_min_excl_vat = float('inf')
                 else:
-                    net_min = (product_cost + activity_discount) / net_denom
-                min_price = max(gross_min, net_min)
+                    net_min_excl_vat = (product_cost + activity_discount) / net_denom
+                min_price_excl_vat = max(gross_min_excl_vat, net_min_excl_vat)
 
-            return round(max(min_price, 0), 2)
+            # ✅ 轉為含稅價（對外建議售價）
+            min_price_incl_vat = min_price_excl_vat * 1.05
+
+            return round(max(min_price_incl_vat, 0), 2)
 
         df_priced['推薦售價(TWD)'] = df_priced.apply(recommend_min_price_for_existing, axis=1)
         df_priced = df_priced.dropna(subset=['推薦售價(TWD)'])
