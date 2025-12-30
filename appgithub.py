@@ -81,7 +81,7 @@ freight_absorption_method_global = st.sidebar.radio("🚚 預設運費吸收", [
 # 上傳檔案
 # ==============================
 st.subheader("📤 請上傳您的商品資料 Excel 檔")
-uploaded_file = st.file_uploader("支援 .xlsx 格式（建議欄位：品號、品名、零售價、標準進價、單位淨重）", type=["xlsx"])
+uploaded_file = st.file_uploader("支援 .xlsx 格式（建議欄位：品號、品名、零售價、最近進價、單位淨重）", type=["xlsx"])
 
 if uploaded_file is not None:
     try:
@@ -101,7 +101,7 @@ if uploaded_file is not None:
         '品號': ['品號', '商品編號', 'SKU', '貨號', '編號'],
         '品名': ['品名', '商品名稱', '名稱', '產品名', '商品'],
         '零售價': ['零售價', '售價', '建議售價', '蝦皮售價', '價格', '定價'],
-        '標準進價': ['標準進價', '進價', '成本價', '採購價', '進貨價', '成本'],
+        '最近進價': ['最近進價', '最新進價', 'Last Cost', 'last_price', '進價', '採購價', '成本價'], 
         '單位淨重': ['單位淨重', '淨重', '重量(kg)', '重量', 'Weight']
     }
 
@@ -122,12 +122,12 @@ if uploaded_file is not None:
 
     # ———————— 資料清理 ————————
     df['零售價'] = pd.to_numeric(df['零售價'], errors='coerce')
-    df['標準進價'] = pd.to_numeric(df['標準進價'], errors='coerce')
+    df['最近進價'] = pd.to_numeric(df['最近進價'], errors='coerce')
     df['單位淨重'] = pd.to_numeric(df['單位淨重'], errors='coerce').fillna(0.0)
 
     valid_mask = (
         (~df['品名'].isin(['蝦皮折抵卷', '運費', '折價券'])) &
-        (df['標準進價'] > 0)
+        (df['最近進價'] > 0)
     )
     df_valid = df[valid_mask].copy()
 
@@ -141,11 +141,11 @@ if uploaded_file is not None:
     has_positive_price = df_valid['零售價'] > 0
     if has_positive_price.any():
         if convert_cost_with_exchange_rate:
-            cost_twd_est = df_valid.loc[has_positive_price, '標準進價'] * exchange_rate
+            cost_twd_est = df_valid.loc[has_positive_price, '最近進價'] * exchange_rate
             if (df_valid.loc[has_positive_price, '零售價'] < cost_twd_est).any():
                 st.warning("⚠️ 注意：部分商品「售價 < 進價×匯率」，可能導致虧損！")
         else:
-            if (df_valid.loc[has_positive_price, '零售價'] < df_valid.loc[has_positive_price, '標準進價']).any():
+            if (df_valid.loc[has_positive_price, '零售價'] < df_valid.loc[has_positive_price, '最近進價']).any():
                 st.warning("⚠️ 注意：部分商品「售價 < 進價（已視為台幣）」，可能導致虧損！")
 
     # ———————— 初始化參數欄位 ————————
@@ -159,7 +159,7 @@ if uploaded_file is not None:
 
     # ———————— 欄位順序 ————————
     desired_order = [
-        '品號', '品名', '零售價', '標準進價', '單位淨重',
+        '品號', '品名', '零售價', '最近進價', '單位淨重',
         '進口稅率(%)', '貨物稅率(%)', '進項營業稅率(%)',
         '重量浮動範圍(%)', '活動折扣金額(NT$)',
         '包材方式', '運費吸收方式'
@@ -296,8 +296,11 @@ if uploaded_file is not None:
 
     # ———————— 核心計算函數 ————————
     def calculate_profit(row):
-        retail_price = float(row['零售價'])
-        cost_cny = float(row['標準進價'])
+        retail_price_incl_vat = float(row['零售價'])  # 使用者上傳的是含稅價
+        retail_price = retail_price_incl_vat / 1.05    # ← 轉為不含稅售價（真正營收）
+        output_vat = retail_price_incl_vat - retail_price  # 可選：用於顯示，但不影響利潤計算
+
+        cost_cny = float(row['最近進價'])
         weight_kg = float(row['單位淨重'])
 
         import_tax_rate = float(row['進口稅率(%)']) / 100
@@ -318,18 +321,20 @@ if uploaded_file is not None:
         freight_cost = adjusted_weight * freight_per_kg
         product_cost = cost_twd + import_tax + excise_tax + input_vat + freight_cost
 
+        # 注意：以下費用比例應基於「不含稅售價」計算（符合會計慣例）
         packing_cost = retail_price * 0.01 if row['包材方式'] == "商品售價 × 1%" else 10
         bad_rate_cost = retail_price * 0.01
         marketing_cost = retail_price * 0.10
         ad_cost = retail_price * 0.10
         shopee_fee = retail_price * 0.10
-        output_vat = retail_price * 0.05
+        # output_vat 已從收入中剝離，此處「不應再扣」！
         income_tax = retail_price * 0.02
         freight_absorption = retail_price * 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60
 
         operating_cost = (
             packing_cost + bad_rate_cost + marketing_cost + ad_cost +
-            shopee_fee + output_vat + income_tax + activity_discount + freight_absorption
+            shopee_fee + income_tax + activity_discount + freight_absorption
+            # 注意：已移除 output_vat
         )
 
         gross_margin = (retail_price - product_cost) / retail_price if retail_price > 0 else 0
@@ -482,16 +487,16 @@ if uploaded_file is not None:
     # ———————— 建議售價區塊 ————————
     missing_price_mask = (
         ((df_valid['零售價'].isna()) | (df_valid['零售價'] <= 0)) &
-        (df_valid['標準進價'] > 0)
+        (df_valid['最近進價'] > 0)
     )
 
     if missing_price_mask.any():
-        st.subheader("💡 建議售價（基於當前異常判定標準）")
+        st.subheader("💡 建議售價（無售價商品，基於當前異常判定標準）")
         
         df_missing = df_valid[missing_price_mask].copy()
         
         def recommend_price(row):
-            cost_cny = float(row['標準進價'])
+            cost_cny = float(row['最近進價'])
             weight_kg = float(row['單位淨重'])
 
             import_tax_rate = float(row['進口稅率(%)']) / 100
@@ -538,7 +543,7 @@ if uploaded_file is not None:
         df_missing = df_missing.dropna(subset=['建議售價(TWD)'])
 
         if not df_missing.empty:
-            display_recommend = df_missing[['品號', '品名', '標準進價', '單位淨重', '建議售價(TWD)']].copy()
+            display_recommend = df_missing[['品號', '品名', '最近進價', '單位淨重', '建議售價(TWD)']].copy()
             st.dataframe(display_recommend, use_container_width=True, hide_index=True)
             
             output_rec = io.BytesIO()
@@ -554,6 +559,109 @@ if uploaded_file is not None:
             st.info("⚠️ 無法為缺失售價的商品計算建議價格（參數導致無解）")
     else:
         st.info("✅ 所有商品均有有效售價（>0），無需推薦。")
+
+    # ———————— 售價優化建議：對所有有進價 & 有售價的商品計算推薦售價 ————————
+    valid_with_price_mask = (
+        (df_valid['最近進價'] > 0) &
+        (df_valid['零售價'].notna()) &
+        (df_valid['零售價'] > 0)
+    )
+
+    if valid_with_price_mask.any():
+        st.subheader("🔄 全商品售價健康度檢視（含推薦售價）")
+        
+        df_priced = df_valid[valid_with_price_mask].copy()
+        
+        def recommend_min_price_for_existing(row):
+            cost_cny = float(row['最近進價'])
+            weight_kg = float(row['單位淨重'])
+
+            import_tax_rate = float(row['進口稅率(%)']) / 100
+            excise_tax_rate = float(row['貨物稅率(%)']) / 100
+            input_vat_rate = float(row['進項營業稅率(%)']) / 100
+            weight_buffer = float(row['重量浮動範圍(%)']) / 100
+            activity_discount = float(row['活動折扣金額(NT$)'])
+
+            if convert_cost_with_exchange_rate:
+                cost_twd = cost_cny * exchange_rate
+            else:
+                cost_twd = cost_cny
+
+            import_tax = cost_twd * import_tax_rate
+            excise_tax = (cost_twd + import_tax) * excise_tax_rate
+            input_vat = (cost_twd + import_tax + excise_tax) * input_vat_rate
+            adjusted_weight = weight_kg * (1 + weight_buffer)
+            freight_cost = adjusted_weight * freight_per_kg
+            product_cost = cost_twd + import_tax + excise_tax + input_vat + freight_cost
+
+            # 包材與運費吸收轉為比例（固定金額則用 10/售價 或 60/售價，但此處用近似處理）
+            # 為了精確，我們在推薦售價公式中保留固定成本項，但此處簡化用比例估算下限
+            # 更嚴謹做法是解方程，但為效能與穩定性，沿用原邏輯
+            packing_ratio = 0.01 if row['包材方式'] == "商品售價 × 1%" else 10 / max(row['零售價'], 1)
+            freight_absorption_ratio = 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60 / max(row['零售價'], 1)
+            
+            # 固定費用無法直接轉比例，因此我們改用「總營業費用比例」的保守估計
+            # 此處沿用原始 profit 計算中的固定比例（行銷10%+廣告10%+蝦皮10%+銷項5%+所得2%+不良1%）
+            base_opex_ratio = 0.10 + 0.10 + 0.10 + 0.05 + 0.02 + 0.01  # = 38%
+            total_opex_ratio = base_opex_ratio + packing_ratio + freight_absorption_ratio
+
+            if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
+                denom = 1 - total_opex_ratio
+                if denom <= 0:
+                    return None
+                min_price = (product_cost + activity_discount) / denom
+            else:
+                # 毛利率門檻
+                gross_min = product_cost / (1 - abnormal_gross_margin_threshold / 100)
+                # 淨利率門檻：retail_price - product_cost - opex >= retail_price * net_threshold
+                # => retail_price * (1 - net_threshold - opex_ratio) >= product_cost + discount
+                net_denom = 1 - abnormal_net_profit_threshold / 100 - total_opex_ratio
+                if net_denom <= 0:
+                    net_min = float('inf')
+                else:
+                    net_min = (product_cost + activity_discount) / net_denom
+                min_price = max(gross_min, net_min)
+
+            return round(max(min_price, 0), 2)
+
+        df_priced['推薦售價(TWD)'] = df_priced.apply(recommend_min_price_for_existing, axis=1)
+        df_priced = df_priced.dropna(subset=['推薦售價(TWD)'])
+
+        # 合併是否異常狀態
+        status_map = result_df.set_index('品號')['狀態'].to_dict()
+        action_map = result_df.set_index('品號')['行動建議'].to_dict()
+        df_priced['是否異常'] = df_priced['品號'].map(status_map).fillna('未知')
+        df_priced['行動建議'] = df_priced['品號'].map(action_map).fillna('')
+
+        # 新增「建議行動」描述
+        def get_action_text(row):
+            current = row['零售價']
+            recommend = row['推薦售價(TWD)']
+            if current >= recommend:
+                return "✅ 當前售價足夠"
+            else:
+                return f"⚠️ 建議調升至 {recommend:.2f} 元"
+
+        df_priced['售價建議'] = df_priced.apply(get_action_text, axis=1)
+
+        # 整理輸出欄位
+        display_optimize = df_priced[[
+            '品號', '品名', '最近進價', '零售價', '推薦售價(TWD)', '是否異常', '售價建議'
+        ]].copy()
+        display_optimize = display_optimize.rename(columns={'零售價': '當前售價(TWD)'})
+
+        st.dataframe(display_optimize, use_container_width=True, hide_index=True)
+
+        # 匯出按鈕
+        output_opt = io.BytesIO()
+        with pd.ExcelWriter(output_opt, engine='openpyxl') as writer:
+            display_optimize.to_excel(writer, sheet_name="全商品售價建議", index=False)
+        st.download_button(
+            label="⬇️ 下載全商品售價建議清單",
+            data=output_opt.getvalue(),
+            file_name=f"全商品售價建議_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     # ———————— 數據可視化 ————————
     st.subheader("📈 商品獲利能力可視化分析")
@@ -597,4 +705,4 @@ if uploaded_file is not None:
         st.plotly_chart(fig_bar, use_container_width=True)
 
 else:
-    st.info("💡 請上傳 Excel 檔以開始分析（建議欄位：品號、品名、零售價、標準進價、單位淨重）")
+    st.info("💡 請上傳 Excel 檔以開始分析（建議欄位：品號、品名、零售價、最近進價、單位淨重）")
