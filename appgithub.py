@@ -287,18 +287,16 @@ if uploaded_file is not None:
         product_cost = cost_twd + import_tax + excise_tax + freight_cost
 
 
-        # 注意：以下費用比例應基於「不含稅售價」計算（符合會計慣例）
+        # 注意：以下費用比例基於「不含稅售價」計算
         packing_cost = 15
         marketing_cost = retail_price * 0.10
         ad_cost = retail_price * 0.10
         shopee_fee = retail_price * 0.10
-        # output_vat 已從收入中剝離。
         freight_absorption = retail_price * 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60
 
         operating_cost = (
             packing_cost + marketing_cost + ad_cost +
             shopee_fee + activity_discount + freight_absorption
-            # 已移除 output_vat
         )
 
         gross_margin = (retail_price - product_cost) / retail_price if retail_price > 0 else 0
@@ -337,7 +335,7 @@ if uploaded_file is not None:
     result_df = df_for_analysis.apply(calculate_profit, axis=1)
 
     # ———————— 新增：標記並排序最近編輯商品（不新增欄位）——————
-    # 我們在排序時直接用 set 判斷，不加新欄
+    # 在排序時直接用 set 判斷，不加新欄
     last_edited_set = st.session_state.last_edited_skus
 
     # 自訂排序鍵：編輯過的放前面
@@ -426,10 +424,10 @@ if uploaded_file is not None:
         )
         st.dataframe(styled_normal, use_container_width=True, hide_index=True)
 
-    # ———————— 匯出報告（按指定順序）——————
+    # ———————— 匯出報告 ——————
     st.subheader("📥 匯出完整分析報告")
 
-    # 定義匯出欄位順序（符合你的需求）
+    # 定義匯出欄位順序
     export_columns_order = [
         '品號', '品名',
         '毛利率(%)', '稅後淨利率(%)',
@@ -488,7 +486,6 @@ if uploaded_file is not None:
             marketing_ratio = 0.10
             ad_ratio = 0.10
             shopee_ratio = 0.10
-            income_tax_ratio = 0.02
             output_vat_ratio = 0.05  # 銷項稅雖不影響利潤，但若用於費用估算則保留（此處不計入）
             
             # 運費吸收：可能是固定或比例
@@ -500,7 +497,7 @@ if uploaded_file is not None:
                 freight_absorption_ratio = 0.06
 
             fixed_costs = packing_fixed + freight_absorption_fixed + activity_discount
-            variable_ratio = marketing_ratio + ad_ratio + shopee_ratio + income_tax_ratio + freight_absorption_ratio
+            variable_ratio = marketing_ratio + ad_ratio + shopee_ratio + freight_absorption_ratio
 
             if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
                 # 要求：retail_price - product_cost - fixed_costs - retail_price * variable_ratio >= 0
