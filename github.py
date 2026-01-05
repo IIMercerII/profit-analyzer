@@ -23,6 +23,12 @@ st.markdown("""
 """)
 
 # ==============================
+# 單品快速試算開關
+# ==============================
+use_quick_calc = st.sidebar.checkbox("✨ 啟用單品快速試算（無需上傳檔案）", value=False)
+
+
+# ==============================
 # 側邊欄：異常判定標準
 # ==============================
 st.sidebar.header("⚠️ 異常判定標準（可自訂）")
@@ -59,6 +65,149 @@ default_weight_buffer_pct = st.sidebar.slider("預設重量浮動範圍 (%)", mi
 default_activity_discount = st.sidebar.number_input("預設活動折扣金額 (NT$)", value=0, step=1)
 
 freight_absorption_method_global = st.sidebar.radio("🚚 預設運費吸收", ["商品售價 × 6%", "固定 60 NT$"], index=0)
+
+# ==============================
+# 品快速試算開關核心計算函數（通用版，支援 Series 或 dict）
+# ==============================
+def calculate_profit(row):
+    # 統一轉為 float，支援 dict 或 Series
+    def safe_float(val):
+        return float(val) if pd.notna(val) else 0.0
+
+    retail_price_incl_vat = safe_float(row['零售價'])  # 含稅售價（使用者輸入）
+    if retail_price_incl_vat <= 0:
+        st.error("❌ 售價必須大於 0")
+        return None
+
+    retail_price = retail_price_incl_vat / 1.05    # 不含稅售價（真正營收）
+
+    cost_twd = safe_float(row['最近進價'])
+    if cost_twd <= 0:
+        st.error("❌ 進價必須大於 0")
+        return None
+
+    weight_kg = safe_float(row.get('單位淨重', 0.0))
+    import_tax_rate = safe_float(row.get('進口稅率(%)', default_import_tax_pct)) / 100
+    excise_tax_rate = safe_float(row.get('貨物稅率(%)', default_excise_tax_pct)) / 100
+    weight_buffer = safe_float(row.get('重量浮動範圍(%)', default_weight_buffer_pct)) / 100
+    activity_discount = safe_float(row.get('活動折扣金額(NT$)', default_activity_discount))
+    freight_absorption_method = row.get('運費吸收方式', freight_absorption_method_global)
+
+    import_tax = cost_twd * import_tax_rate
+    excise_tax = (cost_twd + import_tax) * excise_tax_rate
+    adjusted_weight = weight_kg * (1 + weight_buffer)
+    freight_cost = adjusted_weight * freight_per_kg
+    product_cost = cost_twd + import_tax + excise_tax + freight_cost
+
+    # ===== 費用計算 =====
+    packing_cost = 15
+    marketing_cost = retail_price * 0.10
+    ad_cost = retail_price * 0.10
+    shopee_fee = retail_price_incl_vat * 0.10
+    freight_absorption = retail_price_incl_vat * 0.06 if freight_absorption_method == "商品售價 × 6%" else 60
+
+    operating_cost = (
+        packing_cost + marketing_cost + ad_cost +
+        shopee_fee + activity_discount + freight_absorption
+    )
+
+    gross_margin = (retail_price - product_cost) / retail_price if retail_price > 0 else 0
+    net_profit_amount = retail_price - product_cost - operating_cost
+    net_profit_rate = net_profit_amount / retail_price if retail_price > 0 else 0
+
+    gross_margin_pct = gross_margin * 100
+    net_profit_rate_pct = net_profit_rate * 100
+
+    is_abnormal = (gross_margin_pct < abnormal_gross_margin_threshold) or \
+                  (net_profit_rate_pct < abnormal_net_profit_threshold)
+    
+    if net_profit_amount < 0:
+        action = "建議淘汰"
+    elif is_abnormal:
+        action = "需壓降成本"
+    else:
+        action = "正常"
+
+    return {
+        '品號': row.get('品號', 'AUTO-001'),
+        '品名': row.get('品名', '未命名商品'),
+        '零售價(TWD)': round(retail_price_incl_vat, 2),
+        '商品成本(TWD)': round(product_cost, 2),
+        '營業費用(TWD)': round(operating_cost, 2),
+        '總成本(TWD)': round(product_cost + operating_cost, 2),
+        '毛利率(%)': round(gross_margin_pct, 2),
+        '稅後淨利率(%)': round(net_profit_rate_pct, 2),
+        '狀態': '異常' if is_abnormal else '正常',
+        '行動建議': action
+    }
+
+# ==============================
+# 單品快速試算區塊
+# ==============================
+if use_quick_calc:
+    st.subheader("✨ 單品快速試算（臨時商品分析）")
+    
+    with st.form("quick_calc_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            sku = st.text_input("品號（可留空）", placeholder="例如：A1001")
+            price = st.number_input("零售價 (NT$，含稅)", min_value=0.01, value=500.0, step=10.0)
+            cost = st.number_input("最近進價 (NT$)", min_value=0.01, value=200.0, step=10.0)
+            weight = st.number_input("單位淨重 (kg)", min_value=0.0, value=1.0, step=0.1)
+        with col2:
+            name = st.text_input("品名（可留空）", placeholder="例如：保溫杯")
+            import_tax = st.number_input("進口稅率 (%)", min_value=0.0, max_value=100.0, value=default_import_tax_pct, step=1.0)
+            excise_tax = st.number_input("貨物稅率 (%)", min_value=0.0, max_value=100.0, value=default_excise_tax_pct, step=1.0)
+            weight_buffer = st.slider("重量浮動範圍 (%)", min_value=-10, max_value=20, value=default_weight_buffer_pct)
+            activity_discount = st.number_input("活動折扣金額 (NT$)", min_value=0, value=default_activity_discount, step=1)
+            freight_absorption = st.radio("運費吸收方式", ["商品售價 × 6%", "固定 60 NT$"], index=0 if freight_absorption_method_global == "商品售價 × 6%" else 1)
+
+        submitted = st.form_submit_button("🔍 立即計算")
+
+    if submitted:
+        # 構造模擬 row
+        mock_row = {
+            '品號': sku.strip() if sku.strip() else f"AUTO-{datetime.now().strftime('%H%M%S')}",
+            '品名': name.strip() if name.strip() else "未命名商品",
+            '零售價': price,
+            '最近進價': cost,
+            '單位淨重': weight,
+            '進口稅率(%)': import_tax,
+            '貨物稅率(%)': excise_tax,
+            '重量浮動範圍(%)': weight_buffer,
+            '活動折扣金額(NT$)': activity_discount,
+            '運費吸收方式': freight_absorption
+        }
+
+        result = calculate_profit(mock_row)
+        if result:
+            st.success("✅ 計算完成！")
+            
+            # 顯示結果卡片
+            col_r1, col_r2, col_r3 = st.columns(3)
+            with col_r1:
+                st.metric("毛利率", f"{result['毛利率(%)']:.2f}%")
+            with col_r2:
+                st.metric("稅後淨利率", f"{result['稅後淨利率(%)']:.2f}%")
+            with col_r3:
+                st.metric("狀態", result['狀態'], delta=None, delta_color="inverse" if result['狀態']=='異常' else "normal")
+            
+            st.write("**詳細成本結構**")
+            cost_df = pd.DataFrame([{
+                "項目": "商品成本",
+                "金額 (NT$)": result['商品成本(TWD)'],
+            }, {
+                "項目": "營業費用",
+                "金額 (NT$)": result['營業費用(TWD)'],
+            }, {
+                "項目": "總成本",
+                "金額 (NT$)": result['總成本(TWD)'],
+            }])
+            st.dataframe(cost_df, use_container_width=True, hide_index=True)
+            
+            st.info(f"💡 **行動建議**：{result['行動建議']}")
+
+    st.markdown("---")
 
 # ==============================
 # 上傳檔案
