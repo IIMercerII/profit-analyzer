@@ -32,7 +32,7 @@ abnormal_gross_margin_threshold = st.sidebar.number_input(
     max_value=100.0, 
     value=55.0, 
     step=1.0,
-    help="低於此值即視為異常（若啟用「嚴格模式」）"
+    help="低於此值即視為異常"
 )
 abnormal_net_profit_threshold = st.sidebar.number_input(
     "稅後淨利率警戒線 (%)", 
@@ -40,18 +40,10 @@ abnormal_net_profit_threshold = st.sidebar.number_input(
     max_value=100.0, 
     value=10.0, 
     step=1.0,
-    help="低於此值即視為異常（若啟用「嚴格模式」）"
+    help="低於此值即視為異常"
 )
 
-abnormal_mode = st.sidebar.radio(
-    "異常判定模式",
-    options=[
-        "僅淨利 < 0 才算異常（保守）",
-        "毛利率 或 淨利率 低於門檻即異常（嚴格）"
-    ],
-    index=1,
-    help="建議新商品用「嚴格」，成熟商品可用「保守」"
-)
+
 
 # ==============================
 # 側邊欄：全局預設參數
@@ -266,9 +258,8 @@ if uploaded_file is not None:
 
     # ———————— 核心計算函數 ————————
     def calculate_profit(row):
-        retail_price_incl_vat = float(row['零售價'])  # 使用者上傳的是含稅價
-        retail_price = retail_price_incl_vat / 1.05    # ← 轉為不含稅售價（真正營收）
-        output_vat = retail_price_incl_vat - retail_price  # 可選：用於顯示，但不影響利潤計算
+        retail_price_incl_vat = float(row['零售價'])  # 含稅售價（使用者輸入）
+        retail_price = retail_price_incl_vat / 1.05    # 不含稅售價（真正營收）
 
         cost_twd = float(row['最近進價'])
         weight_kg = float(row['單位淨重'])
@@ -278,20 +269,17 @@ if uploaded_file is not None:
         weight_buffer = float(row['重量浮動範圍(%)']) / 100
         activity_discount = float(row['活動折扣金額(NT$)'])
 
-          
-
         import_tax = cost_twd * import_tax_rate
         excise_tax = (cost_twd + import_tax) * excise_tax_rate
         adjusted_weight = weight_kg * (1 + weight_buffer)
         freight_cost = adjusted_weight * freight_per_kg
         product_cost = cost_twd + import_tax + excise_tax + freight_cost
 
-
-        # 注意：以下費用比例基於「不含稅售價」計算
+        # ===== 費用計算（關鍵：蝦皮手續費基於含稅售價，其餘基於不含稅營收）=====
         packing_cost = 15
-        marketing_cost = retail_price * 0.10
-        ad_cost = retail_price * 0.10
-        shopee_fee = retail_price * 0.10
+        marketing_cost = retail_price * 0.10      # 基於不含稅
+        ad_cost = retail_price * 0.10             # 基於不含稅
+        shopee_fee = retail_price_incl_vat * 0.10 # 蝦皮手續費（基於含稅售價）
         freight_absorption = retail_price * 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60
 
         operating_cost = (
@@ -303,15 +291,13 @@ if uploaded_file is not None:
         net_profit_amount = retail_price - product_cost - operating_cost
         net_profit_rate = net_profit_amount / retail_price if retail_price > 0 else 0
 
+
         gross_margin_pct = gross_margin * 100
         net_profit_rate_pct = net_profit_rate * 100
 
-        if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
-            is_abnormal = net_profit_amount < 0
-        else:
-            is_abnormal = (gross_margin_pct < abnormal_gross_margin_threshold) or \
-                          (net_profit_rate_pct < abnormal_net_profit_threshold)
-
+        is_abnormal = (gross_margin_pct < abnormal_gross_margin_threshold) or \
+                    (net_profit_rate_pct < abnormal_net_profit_threshold)
+        
         if net_profit_amount < 0:
             action = "建議淘汰"
         elif is_abnormal:
@@ -322,7 +308,7 @@ if uploaded_file is not None:
         return pd.Series({
             '品號': row['品號'],
             '品名': row['品名'],
-            '零售價(TWD)': round(retail_price, 2),
+            '零售價(TWD)': round(retail_price, 2),  # 顯示含稅價給使用者
             '商品成本(TWD)': round(product_cost, 2),
             '營業費用(TWD)': round(operating_cost, 2),
             '總成本(TWD)': round(product_cost + operating_cost, 2),
@@ -388,10 +374,7 @@ if uploaded_file is not None:
         avg_net = result_df['稅後淨利率(%)'].mean()
         st.metric("平均稅後淨利率", f"{avg_net:.1f}%")
 
-    if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
-        st.caption("📌 當前異常判定：僅「淨利金額 < 0」的商品會被標記為異常")
-    else:
-        st.caption(f"📌 當前異常判定：毛利率 < {abnormal_gross_margin_threshold}% 或 稅後淨利率 < {abnormal_net_profit_threshold}%")
+    st.caption(f"📌 異常判定標準：毛利率 < {abnormal_gross_margin_threshold}% 或 稅後淨利率 < {abnormal_net_profit_threshold}%")
 
     # ———————— 異常商品清單（僅顯示毛利率與稅後淨利率）——————
     abnormal_display = abnormal_df[['品號', '品名', '毛利率(%)', '稅後淨利率(%)']].copy()
@@ -455,190 +438,184 @@ if uploaded_file is not None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # ———————— 建議售價區塊 ————————
-    missing_price_mask = (
-        ((df_valid['零售價'].isna()) | (df_valid['零售價'] <= 0)) &
-        (df_valid['最近進價'] > 0)
+
+    # ———————— 商品建議售價模組 ————————
+    st.subheader("🔄 商品建議售價")
+
+    # 新增兩個控制選項
+    col_a, col_b = st.columns(2)
+    with col_a:
+        show_missing_price = st.checkbox("顯示尚未設定售價的商品", value=False)
+    with col_b:
+        show_only_missing_price = st.checkbox("🔍 僅顯示無售價商品", value=False)
+    use_gross_margin_only = st.checkbox(
+    "僅以毛利率門檻計算建議售價（忽略稅後淨利率）",
+    value=False,
+    help="勾選後，建議售價只確保達到「毛利率警戒線」，不考慮淨利率"
     )
 
-    if missing_price_mask.any():
-        st.subheader("💡 建議售價（無售價商品，基於當前異常判定標準）")
-        
-        df_missing = df_valid[missing_price_mask].copy()
-        
-        def recommend_price(row):
-            cost_twd = float(row['最近進價'])
-            weight_kg = float(row['單位淨重'])
+    # 定義基礎條件
+    valid_cost_mask = df_valid['最近進價'] > 0
+    has_price_mask = (df_valid['零售價'].notna()) & (df_valid['零售價'] > 0)
+    missing_price_mask = (~has_price_mask) & valid_cost_mask
 
-            import_tax_rate = float(row['進口稅率(%)']) / 100
-            excise_tax_rate = float(row['貨物稅率(%)']) / 100
-            weight_buffer = float(row['重量浮動範圍(%)']) / 100
-            activity_discount = float(row['活動折扣金額(NT$)'])
-
-            import_tax = cost_twd * import_tax_rate
-            excise_tax = (cost_twd + import_tax) * excise_tax_rate
-            adjusted_weight = weight_kg * (1 + weight_buffer)
-            freight_cost = adjusted_weight * freight_per_kg
-            product_cost = cost_twd + import_tax + excise_tax + freight_cost
-
-            # 固定成本（不隨售價變動）
-            packing_fixed = 15
-            marketing_ratio = 0.10
-            ad_ratio = 0.10
-            shopee_ratio = 0.10
-            output_vat_ratio = 0.05  # 銷項稅雖不影響利潤，但若用於費用估算則保留（此處不計入）
-            
-            # 運費吸收：可能是固定或比例
-            if row['運費吸收方式'] == "固定 60 NT$":
-                freight_absorption_fixed = 60
-                freight_absorption_ratio = 0
-            else:
-                freight_absorption_fixed = 0
-                freight_absorption_ratio = 0.06
-
-            fixed_costs = packing_fixed + freight_absorption_fixed + activity_discount
-            variable_ratio = marketing_ratio + ad_ratio + shopee_ratio + freight_absorption_ratio
-
-            if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
-                # 要求：retail_price - product_cost - fixed_costs - retail_price * variable_ratio >= 0
-                # => retail_price * (1 - variable_ratio) >= product_cost + fixed_costs
-                denom = 1 - variable_ratio
-                if denom <= 0:
-                    return None
-                min_price_excl_vat = (product_cost + fixed_costs) / denom
-            else:
-                # 毛利率條件：(retail_price - product_cost) / retail_price >= gross_threshold
-                # => retail_price >= product_cost / (1 - gross_threshold)
-                gross_min_excl_vat = product_cost / (1 - abnormal_gross_margin_threshold / 100)
-
-                # 淨利率條件：(retail_price - product_cost - fixed_costs - retail_price * variable_ratio) / retail_price >= net_threshold
-                # => 1 - (product_cost + fixed_costs)/retail_price - variable_ratio >= net_threshold
-                # => (product_cost + fixed_costs) / retail_price <= 1 - variable_ratio - net_threshold
-                # => retail_price >= (product_cost + fixed_costs) / (1 - variable_ratio - net_threshold)
-                net_denom = 1 - variable_ratio - (abnormal_net_profit_threshold / 100)
-                if net_denom <= 0:
-                    net_min_excl_vat = float('inf')
-                else:
-                    net_min_excl_vat = (product_cost + fixed_costs) / net_denom
-
-                min_price_excl_vat = max(gross_min_excl_vat, net_min_excl_vat)
-
-            min_price_incl_vat = min_price_excl_vat * 1.05
-            return round(max(min_price_incl_vat, 0), 2)
-
-        df_missing['建議售價(TWD)'] = df_missing.apply(recommend_price, axis=1)
-        df_missing = df_missing.dropna(subset=['建議售價(TWD)'])
-
-        if not df_missing.empty:
-            display_recommend = df_missing[['品號', '品名', '最近進價', '單位淨重', '建議售價(TWD)']].copy()
-            st.dataframe(display_recommend, use_container_width=True, hide_index=True)
-            
-            output_rec = io.BytesIO()
-            with pd.ExcelWriter(output_rec, engine='openpyxl') as writer:
-                display_recommend.to_excel(writer, sheet_name="建議售價", index=False)
-            st.download_button(
-                label="⬇️ 下載建議售價清單",
-                data=output_rec.getvalue(),
-                file_name=f"建議售價_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.info("⚠️ 無法為缺失售價的商品計算建議價格（參數導致無解）")
+    # 決定最終要顯示哪些商品
+    if show_only_missing_price:
+        # 強制只看無售價商品
+        df_to_price_check = df_valid[missing_price_mask].copy()
+    elif show_missing_price:
+        # 顯示所有（含無售價）
+        df_to_price_check = df_valid[valid_cost_mask].copy()
     else:
-        st.info("✅ 所有商品均有有效售價（>0），無需推薦。")
+        # 預設：只看有售價商品
+        df_to_price_check = df_valid[has_price_mask & valid_cost_mask].copy()
 
-    # ———————— 售價優化建議：對所有有進價 & 有售價的商品計算推薦售價 ————————
-    valid_with_price_mask = (
-        (df_valid['最近進價'] > 0) &
-        (df_valid['零售價'].notna()) &
-        (df_valid['零售價'] > 0)
-    )
+    if df_to_price_check.empty:
+        st.info("⚠️ 沒有符合條件的商品可供分析。")
+    else:
+        # ———————— 計算推薦售價（共用函數） ————————
+        def recommend_min_price(row, gross_margin_threshold, net_profit_threshold, gross_only=False):
+            """
+            計算建議售價（含稅）
+            - 若 gross_only=True：只保毛利率
+            - 否則：同時保毛利率與淨利率
+            """
+            try:
+                cost_twd = float(row['最近進價'])
+                weight_kg = float(row['單位淨重'])
 
-    if valid_with_price_mask.any():
-        st.subheader("🔄 全商品售價健康度檢視（含推薦售價）")
-        
-        df_priced = df_valid[valid_with_price_mask].copy()
-        
-        def recommend_min_price_for_existing(row):
-            cost_twd = float(row['最近進價'])
-            weight_kg = float(row['單位淨重'])
+                import_tax_rate = float(row['進口稅率(%)']) / 100
+                excise_tax_rate = float(row['貨物稅率(%)']) / 100
+                weight_buffer = float(row['重量浮動範圍(%)']) / 100
+                activity_discount = float(row['活動折扣金額(NT$)'])
 
-            import_tax_rate = float(row['進口稅率(%)']) / 100
-            excise_tax_rate = float(row['貨物稅率(%)']) / 100
-            weight_buffer = float(row['重量浮動範圍(%)']) / 100
-            activity_discount = float(row['活動折扣金額(NT$)'])
+                # === 商品成本 ===
+                import_tax = cost_twd * import_tax_rate
+                excise_tax = (cost_twd + import_tax) * excise_tax_rate
+                adjusted_weight = weight_kg * (1 + weight_buffer)
+                freight_cost = adjusted_weight * freight_per_kg
+                product_cost = cost_twd + import_tax + excise_tax + freight_cost
 
-            import_tax = cost_twd * import_tax_rate
-            excise_tax = (cost_twd + import_tax) * excise_tax_rate
-            adjusted_weight = weight_kg * (1 + weight_buffer)
-            freight_cost = adjusted_weight * freight_per_kg
-            product_cost = cost_twd + import_tax + excise_tax + freight_cost
+                if gross_only:
+                    # —————— 僅保毛利率 ——————
+                    gm_threshold = gross_margin_threshold / 100.0
+                    if gm_threshold >= 1.0 or gm_threshold < 0:
+                        return None
+                    denom = 1.0 - gm_threshold
+                    if denom <= 0:
+                        return None
+                    min_price_excl_vat = product_cost / denom
+                    min_price_incl_vat = min_price_excl_vat * 1.05
+                    return round(max(min_price_incl_vat, 0), 2)
 
-            packing_fixed = 15
-
-            if row['運費吸收方式'] == "固定 60 NT$":
-                freight_absorption_fixed = 60
-                freight_absorption_ratio = 0
-            else:
-                freight_absorption_fixed = 0
-                freight_absorption_ratio = 0.06
-
-            fixed_costs = packing_fixed + freight_absorption_fixed + activity_discount
-            variable_ratio = 0.10 + 0.10 + 0.10 + freight_absorption_ratio  # 不良+行銷+廣告+蝦皮+所得+運費吸收比例
-
-            if abnormal_mode == "僅淨利 < 0 才算異常（保守）":
-                denom = 1 - variable_ratio
-                if denom <= 0:
-                    return None
-                min_price_excl_vat = (product_cost + fixed_costs) / denom
-            else:
-                gross_min_excl_vat = product_cost / (1 - abnormal_gross_margin_threshold / 100)
-                net_denom = 1 - variable_ratio - (abnormal_net_profit_threshold / 100)
-                if net_denom <= 0:
-                    net_min_excl_vat = float('inf')
                 else:
-                    net_min_excl_vat = (product_cost + fixed_costs) / net_denom
-                min_price_excl_vat = max(gross_min_excl_vat, net_min_excl_vat)
+                    # —————— 同時保毛利率與淨利率 ——————
+                    packing_fixed = 15
+                    if row['運費吸收方式'] == "固定 60 NT$":
+                        freight_absorption_fixed = 60
+                        freight_absorption_ratio = 0.0
+                    else:
+                        freight_absorption_fixed = 0.0
+                        freight_absorption_ratio = 0.06
 
-            min_price_incl_vat = min_price_excl_vat * 1.05
-            return round(max(min_price_incl_vat, 0), 2)
+                    fixed_costs = packing_fixed + activity_discount + freight_absorption_fixed
 
-        df_priced['推薦售價(TWD)'] = df_priced.apply(recommend_min_price_for_existing, axis=1)
-        df_priced = df_priced.dropna(subset=['推薦售價(TWD)'])
+                    marketing_ratio = 0.10
+                    ad_ratio = 0.10
+                    shopee_equiv_ratio = 0.10 * 1.05  # 蝦皮手續費等效比例
 
-        # 合併是否異常狀態
-        status_map = result_df.set_index('品號')['狀態'].to_dict()
-        action_map = result_df.set_index('品號')['行動建議'].to_dict()
-        df_priced['是否異常'] = df_priced['品號'].map(status_map).fillna('未知')
-        df_priced['行動建議'] = df_priced['品號'].map(action_map).fillna('')
+                    total_variable_ratio = marketing_ratio + ad_ratio + freight_absorption_ratio + shopee_equiv_ratio
 
-        # 新增「建議行動」描述
+                    # 毛利率條件
+                    gm_threshold = gross_margin_threshold / 100.0
+                    price_for_gm = float('inf')
+                    if gm_threshold < 1.0 and gm_threshold >= 0:
+                        denom_gm = 1.0 - gm_threshold
+                        if denom_gm > 0:
+                            price_for_gm = product_cost / denom_gm
+
+                    # 淨利率條件
+                    np_threshold = net_profit_threshold / 100.0
+                    denom_np = 1.0 - total_variable_ratio - np_threshold
+                    price_for_np = float('inf')
+                    if denom_np > 0:
+                        price_for_np = (product_cost + fixed_costs) / denom_np
+
+                    min_price_excl_vat = max(price_for_gm, price_for_np)
+                    if not (min_price_excl_vat < float('inf')):
+                        return None
+
+                    min_price_incl_vat = min_price_excl_vat * 1.05
+                    return round(max(min_price_incl_vat, 0), 2)
+
+            except (ValueError, TypeError, ZeroDivisionError, KeyError):
+                return None
+
+        df_to_price_check['推薦售價(TWD)'] = df_to_price_check.apply(
+            lambda row: recommend_min_price(
+                row,
+                abnormal_gross_margin_threshold,
+                abnormal_net_profit_threshold,
+                gross_only=use_gross_margin_only
+            ),
+            axis=1
+        )        
+        df_to_price_check = df_to_price_check.dropna(subset=['推薦售價(TWD)'])
+
+        # ———————— 生成建議文案 ————————
         def get_action_text(row):
             current = row['零售價']
             recommend = row['推薦售價(TWD)']
-            if current >= recommend:
-                return "✅ 當前售價足夠"
+            if pd.isna(current) or current <= 0:
+                return f"💡 建議售價：{recommend:.2f} 元"
+            elif current >= recommend:
+                return f"✅ 可降價至 {recommend:.2f} 元（仍達成利潤門檻）"
             else:
                 return f"⚠️ 建議調升至 {recommend:.2f} 元"
 
-        df_priced['售價建議'] = df_priced.apply(get_action_text, axis=1)
+        df_to_price_check['售價建議'] = df_to_price_check.apply(get_action_text, axis=1)
 
-        # 整理輸出欄位
-        display_optimize = df_priced[[
-            '品號', '品名', '最近進價', '零售價', '推薦售價(TWD)', '是否異常', '售價建議'
-        ]].copy()
-        display_optimize = display_optimize.rename(columns={'零售價': '當前售價(TWD)'})
+        # ———————— 準備顯示欄位（不包含「是否異常」）——————
+        df_to_price_check['當前售價(TWD)'] = df_to_price_check['零售價']
+        display_cols = [
+            '品號', '品名', '最近進價', 
+            '當前售價(TWD)', '推薦售價(TWD)', '售價建議'
+        ]
+        final_display = df_to_price_check[display_cols].copy()
 
-        st.dataframe(display_optimize, use_container_width=True, hide_index=True)
+        # ———————— 高亮最近編輯的商品 ————————
+        def highlight_edited(row):
+            styles = []
+            for col in row.index:
+                if col in ['品號', '品名'] and row['品號'] in st.session_state.last_edited_skus:
+                    styles.append('background-color: #FFF3B0; color: #000000; font-weight: bold')
+                else:
+                    styles.append('')
+            return styles
 
-        # 匯出按鈕
-        output_opt = io.BytesIO()
-        with pd.ExcelWriter(output_opt, engine='openpyxl') as writer:
-            display_optimize.to_excel(writer, sheet_name="全商品售價建議", index=False)
+        styled_final = (
+            final_display.style.apply(highlight_edited, axis=1)
+            .format({
+                '最近進價': '{:.2f}',
+                '當前售價(TWD)': lambda x: f"{x:.2f}" if pd.notna(x) and x > 0 else "未設定",
+                '推薦售價(TWD)': '{:.2f}'
+            })
+        )
+        if use_gross_margin_only:
+            st.info(f"💡 當前使用「僅毛利率」模式：建議售價 = 成本 ÷ (1 - {abnormal_gross_margin_threshold}%) × 1.05")
+        else:
+            st.info(f"💡 當前使用「毛利率 + 淨利率」雙重門檻模式")     
+
+        st.dataframe(styled_final, use_container_width=True, hide_index=True)
+
+        # ———————— 匯出按鈕 ————————
+        output_merged = io.BytesIO()
+        with pd.ExcelWriter(output_merged, engine='openpyxl') as writer:
+            final_display.to_excel(writer, sheet_name="售價建議總覽", index=False)
         st.download_button(
-            label="⬇️ 下載全商品售價建議清單",
-            data=output_opt.getvalue(),
-            file_name=f"全商品售價建議_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            label="⬇️ 下載完整售價建議清單",
+            data=output_merged.getvalue(),
+            file_name=f"售價建議總覽_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
