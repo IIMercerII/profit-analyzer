@@ -280,7 +280,7 @@ if uploaded_file is not None:
         marketing_cost = retail_price * 0.10      # 基於不含稅
         ad_cost = retail_price * 0.10             # 基於不含稅
         shopee_fee = retail_price_incl_vat * 0.10 # 蝦皮手續費（基於含稅售價）
-        freight_absorption = retail_price * 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60
+        freight_absorption = retail_price_incl_vat * 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60
 
         operating_cost = (
             packing_cost + marketing_cost + ad_cost +
@@ -516,7 +516,8 @@ if uploaded_file is not None:
                         freight_absorption_ratio = 0.0
                     else:
                         freight_absorption_fixed = 0.0
-                        freight_absorption_ratio = 0.06
+                        # 運費吸收 = 6% × 含稅售價 = 6% × (P_excl * 1.05) = 6.3% × P_excl
+                        freight_absorption_ratio = 0.06 * 1.05  # = 0.063
 
                     fixed_costs = packing_fixed + activity_discount + freight_absorption_fixed
 
