@@ -25,7 +25,7 @@ st.markdown("""
 # ==============================
 # 單品快速試算開關
 # ==============================
-use_quick_calc = st.sidebar.checkbox("✨ 啟用單品快速試算（無需上傳檔案）", value=False)
+use_quick_calc = st.sidebar.checkbox("✨ 啟用單品快速計算", value=False)
 
 
 # ==============================
@@ -50,7 +50,6 @@ abnormal_net_profit_threshold = st.sidebar.number_input(
 )
 
 
-
 # ==============================
 # 側邊欄：全局預設參數
 # ==============================
@@ -67,7 +66,7 @@ default_activity_discount = st.sidebar.number_input("預設活動折扣金額 (N
 freight_absorption_method_global = st.sidebar.radio("🚚 預設運費吸收", ["商品售價 × 6%", "固定 60 NT$"], index=0)
 
 # ==============================
-# 品快速試算開關核心計算函數（通用版，支援 Series 或 dict）
+# 核心計算函數（通用版，支援 Series 或 dict）
 # ==============================
 def calculate_profit(row):
     # 統一轉為 float，支援 dict 或 Series
@@ -145,7 +144,7 @@ def calculate_profit(row):
 # 單品快速試算區塊
 # ==============================
 if use_quick_calc:
-    st.subheader("✨ 單品快速試算（臨時商品分析）")
+    st.subheader("✨ 單品快速計算")
     
     with st.form("quick_calc_form"):
         col1, col2 = st.columns(2)
