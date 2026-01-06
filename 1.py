@@ -23,7 +23,7 @@ st.markdown("""
 """)
 
 # ==============================
-# 單品快速試算開關
+# 單品快速计算開關
 # ==============================
 use_quick_calc = st.sidebar.checkbox("✨ 啟用單品快速計算", value=False)
 
@@ -66,7 +66,7 @@ default_activity_discount = st.sidebar.number_input("預設活動折扣金額 (N
 freight_absorption_method_global = st.sidebar.radio("🚚 預設運費吸收", ["商品售價 × 6%", "固定 60 NT$"], index=0)
 
 # ==============================
-# 核心計算函數（通用版，支援 Series 或 dict）
+# 核心計算函數（支援 Series 或 dict）
 # ==============================
 def calculate_profit(row):
     # 統一轉為 float，支援 dict 或 Series
@@ -141,11 +141,18 @@ def calculate_profit(row):
     }
 
 # ==============================
-# 單品快速試算區塊
+# 單品快速試算區塊（已加入建議售價功能）
 # ==============================
 if use_quick_calc:
     st.subheader("✨ 單品快速計算")
-    
+
+    # 控制是否僅用毛利率計算建議售價
+    use_gross_only_quick = st.checkbox(
+        "僅以毛利率門檻計算建議售價（忽略稅後淨利率）",
+        value=False,
+        help="勾選後，建議售價只確保達到「毛利率警戒線」"
+    )
+
     with st.form("quick_calc_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -181,8 +188,80 @@ if use_quick_calc:
         result = calculate_profit(mock_row)
         if result:
             st.success("✅ 計算完成！")
-            
-            # 顯示結果卡片
+
+            # ———————— 新增：計算建議售價 ————————
+            def recommend_min_price_single(row, gross_margin_threshold, net_profit_threshold, gross_only=False):
+                try:
+                    cost_twd = float(row['最近進價'])
+                    weight_kg = float(row['單位淨重'])
+
+                    import_tax_rate = float(row['進口稅率(%)']) / 100
+                    excise_tax_rate = float(row['貨物稅率(%)']) / 100
+                    weight_buffer = float(row['重量浮動範圍(%)']) / 100
+                    activity_discount = float(row['活動折扣金額(NT$)'])
+
+                    import_tax = cost_twd * import_tax_rate
+                    excise_tax = (cost_twd + import_tax) * excise_tax_rate
+                    adjusted_weight = weight_kg * (1 + weight_buffer)
+                    freight_cost = adjusted_weight * freight_per_kg
+                    product_cost = cost_twd + import_tax + excise_tax + freight_cost
+
+                    if gross_only:
+                        gm_threshold = gross_margin_threshold / 100.0
+                        if gm_threshold >= 1.0 or gm_threshold <= 0:
+                            return None
+                        denom = 1.0 - gm_threshold
+                        if denom <= 0:
+                            return None
+                        min_price_excl_vat = product_cost / denom
+                        return round(min_price_excl_vat * 1.05, 2)
+
+                    else:
+                        packing_fixed = 15
+                        if row['運費吸收方式'] == "固定 60 NT$":
+                            freight_absorption_fixed = 60
+                            freight_absorption_ratio = 0.0
+                        else:
+                            freight_absorption_fixed = 0.0
+                            freight_absorption_ratio = 0.06 * 1.05  # 6% of incl-vat = 6.3% of excl-vat
+
+                        fixed_costs = packing_fixed + activity_discount + freight_absorption_fixed
+                        marketing_ratio = 0.10
+                        ad_ratio = 0.10
+                        shopee_equiv_ratio = 0.10 * 1.05  # 手續費基於含稅價
+
+                        total_variable_ratio = marketing_ratio + ad_ratio + freight_absorption_ratio + shopee_equiv_ratio
+
+                        gm_threshold = gross_margin_threshold / 100.0
+                        np_threshold = net_profit_threshold / 100.0
+
+                        price_for_gm = float('inf')
+                        if 0 <= gm_threshold < 1:
+                            denom_gm = 1.0 - gm_threshold
+                            if denom_gm > 0:
+                                price_for_gm = product_cost / denom_gm
+
+                        price_for_np = float('inf')
+                        denom_np = 1.0 - total_variable_ratio - np_threshold
+                        if denom_np > 0:
+                            price_for_np = (product_cost + fixed_costs) / denom_np
+
+                        min_price_excl_vat = max(price_for_gm, price_for_np)
+                        if min_price_excl_vat == float('inf'):
+                            return None
+                        return round(min_price_excl_vat * 1.05, 2)
+
+                except Exception:
+                    return None
+
+            recommended_price = recommend_min_price_single(
+                mock_row,
+                abnormal_gross_margin_threshold,
+                abnormal_net_profit_threshold,
+                gross_only=use_gross_only_quick
+            )
+
+            # ———————— 顯示結果卡片 ————————
             col_r1, col_r2, col_r3 = st.columns(3)
             with col_r1:
                 st.metric("毛利率", f"{result['毛利率(%)']:.2f}%")
@@ -190,7 +269,19 @@ if use_quick_calc:
                 st.metric("稅後淨利率", f"{result['稅後淨利率(%)']:.2f}%")
             with col_r3:
                 st.metric("狀態", result['狀態'], delta=None, delta_color="inverse" if result['狀態']=='異常' else "normal")
-            
+
+            # ———————— 建議售價提示 ————————
+            if recommended_price is not None:
+                current_price = price
+                if current_price >= recommended_price:
+                    suggestion_text = f"✅ 可降價至 {recommended_price:.2f} 元（仍達成利潤門檻）"
+                else:
+                    suggestion_text = f"⚠️ 建議調升至 {recommended_price:.2f} 元"
+                st.info(f"💡 **售價建議**：{suggestion_text}")
+            else:
+                st.warning("⚠️ 無法計算建議售價（參數可能導致無解）")
+
+            # ———————— 成本結構 ————————
             st.write("**詳細成本結構**")
             cost_df = pd.DataFrame([{
                 "項目": "商品成本",
@@ -203,11 +294,10 @@ if use_quick_calc:
                 "金額 (NT$)": result['總成本(TWD)'],
             }])
             st.dataframe(cost_df, use_container_width=True, hide_index=True)
-            
+
             st.info(f"💡 **行動建議**：{result['行動建議']}")
 
     st.markdown("---")
-
 # ==============================
 # 上傳檔案
 # ==============================
@@ -469,7 +559,7 @@ if uploaded_file is not None:
     result_df = df_for_analysis.apply(calculate_profit, axis=1)
 
     # ———————— 新增：標記並排序最近編輯商品（不新增欄位）——————
-    # 在排序時直接用 set 判斷，不加新欄
+    # 在排序時直接用 set 判斷
     last_edited_set = st.session_state.last_edited_skus
 
     # 自訂排序鍵：編輯過的放前面
@@ -590,7 +680,7 @@ if uploaded_file is not None:
     # ———————— 商品建議售價模組 ————————
     st.subheader("🔄 商品建議售價")
 
-    # 新增兩個控制選項
+    # 兩個控制選項
     col_a, col_b = st.columns(2)
     with col_a:
         show_missing_price = st.checkbox("顯示尚未設定售價的商品", value=False)
@@ -801,8 +891,8 @@ if uploaded_file is not None:
         st.plotly_chart(fig_scatter, use_container_width=True)
 
     with tab3:
-        top_profit = viz_df.nlargest(10, '淨利金額')          # 最賺的10個（已排序：高→低）
-        top_loss = viz_df.nsmallest(10, '淨利金額').iloc[::-1]  # ← 反轉！變成「虧最少 → 虧最多」
+        top_profit = viz_df.nlargest(10, '淨利金額')         
+        top_loss = viz_df.nsmallest(10, '淨利金額').iloc[::-1] 
 
         fig_bar = go.Figure()
         fig_bar.add_trace(go.Bar(
@@ -823,7 +913,7 @@ if uploaded_file is not None:
         fig_bar.update_layout(
             title="Top 10 賺錢 vs 虧錢商品（淨利金額）",
             xaxis_title="淨利金額 (TWD)",
-            barmode='relative',  # 重要：讓正負從 0 軸向兩邊延伸
+            barmode='relative',  
             height=700
         )
         st.plotly_chart(fig_bar, use_container_width=True)
