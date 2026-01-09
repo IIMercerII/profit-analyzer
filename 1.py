@@ -66,23 +66,26 @@ default_activity_discount = st.sidebar.number_input("預設活動折扣金額 (N
 freight_absorption_method_global = st.sidebar.radio("🚚 預設運費吸收", ["商品售價 × 6%", "固定 60 NT$"], index=0)
 
 # ==============================
-# 核心計算函數（支援 Series 或 dict）
+# 核心計算函數（通用版，支援自訂運費）
 # ==============================
-def calculate_profit(row):
-    # 統一轉為 float，支援 dict 或 Series
+def calculate_profit(row, freight_per_kg):
+    """
+    計算單一商品的毛利與淨利率
+    :param row: dict 或 pd.Series，包含必要欄位
+    :param freight_per_kg: 運費 (TWD/kg)
+    :return: dict 結果 或 None（若輸入無效）
+    """
     def safe_float(val):
         return float(val) if pd.notna(val) else 0.0
 
-    retail_price_incl_vat = safe_float(row['零售價'])  # 含稅售價（使用者輸入）
+    retail_price_incl_vat = safe_float(row.get('零售價', 0))
     if retail_price_incl_vat <= 0:
-        st.error("❌ 售價必須大於 0")
         return None
 
-    retail_price = retail_price_incl_vat / 1.05    # 不含稅售價（真正營收）
+    retail_price = retail_price_incl_vat / 1.05  # 不含稅營收
 
-    cost_twd = safe_float(row['最近進價'])
+    cost_twd = safe_float(row.get('最近進價', 0))
     if cost_twd <= 0:
-        st.error("❌ 進價必須大於 0")
         return None
 
     weight_kg = safe_float(row.get('單位淨重', 0.0))
@@ -140,13 +143,86 @@ def calculate_profit(row):
         '行動建議': action
     }
 
+
 # ==============================
-# 單品快速試算區塊（已加入建議售價功能）
+# 推薦售價計算函數（通用版）
+# ==============================
+def recommend_min_price(row, gross_margin_threshold, net_profit_threshold, freight_per_kg, gross_only=False):
+    """
+    計算建議售價（含稅）
+    """
+    try:
+        cost_twd = float(row['最近進價'])
+        weight_kg = float(row['單位淨重'])
+
+        import_tax_rate = float(row.get('進口稅率(%)', default_import_tax_pct)) / 100
+        excise_tax_rate = float(row.get('貨物稅率(%)', default_excise_tax_pct)) / 100
+        weight_buffer = float(row.get('重量浮動範圍(%)', default_weight_buffer_pct)) / 100
+        activity_discount = float(row.get('活動折扣金額(NT$)', default_activity_discount))
+        freight_absorption_method = row.get('運費吸收方式', freight_absorption_method_global)
+
+        import_tax = cost_twd * import_tax_rate
+        excise_tax = (cost_twd + import_tax) * excise_tax_rate
+        adjusted_weight = weight_kg * (1 + weight_buffer)
+        freight_cost = adjusted_weight * freight_per_kg
+        product_cost = cost_twd + import_tax + excise_tax + freight_cost
+
+        if gross_only:
+            gm_threshold = gross_margin_threshold / 100.0
+            if not (0 <= gm_threshold < 1):
+                return None
+            denom = 1.0 - gm_threshold
+            if denom <= 0:
+                return None
+            min_price_excl_vat = product_cost / denom
+            return round(min_price_excl_vat * 1.05, 2)
+
+        else:
+            packing_fixed = 15
+            if freight_absorption_method == "固定 60 NT$":
+                freight_absorption_fixed = 60
+                freight_absorption_ratio = 0.0
+            else:
+                freight_absorption_fixed = 0.0
+                freight_absorption_ratio = 0.06 * 1.05  # 6% of incl-vat = 6.3% of excl-vat
+
+            fixed_costs = packing_fixed + activity_discount + freight_absorption_fixed
+
+            marketing_ratio = 0.10
+            ad_ratio = 0.10
+            shopee_equiv_ratio = 0.10 * 1.05
+
+            total_variable_ratio = marketing_ratio + ad_ratio + freight_absorption_ratio + shopee_equiv_ratio
+
+            gm_threshold = gross_margin_threshold / 100.0
+            np_threshold = net_profit_threshold / 100.0
+
+            price_for_gm = float('inf')
+            if 0 <= gm_threshold < 1:
+                denom_gm = 1.0 - gm_threshold
+                if denom_gm > 0:
+                    price_for_gm = product_cost / denom_gm
+
+            price_for_np = float('inf')
+            denom_np = 1.0 - total_variable_ratio - np_threshold
+            if denom_np > 0:
+                price_for_np = (product_cost + fixed_costs) / denom_np
+
+            min_price_excl_vat = max(price_for_gm, price_for_np)
+            if min_price_excl_vat == float('inf'):
+                return None
+            return round(min_price_excl_vat * 1.05, 2)
+
+    except Exception:
+        return None
+
+
+# ==============================
+# 單品快速試算區塊（使用通用函數）
 # ==============================
 if use_quick_calc:
     st.subheader("✨ 單品快速計算")
 
-    # 控制是否僅用毛利率計算建議售價
     use_gross_only_quick = st.checkbox(
         "僅以毛利率門檻計算建議售價（忽略稅後淨利率）",
         value=False,
@@ -160,6 +236,7 @@ if use_quick_calc:
             price = st.number_input("零售價 (NT$，含稅)", min_value=0.01, value=500.0, step=10.0)
             cost = st.number_input("最近進價 (NT$)", min_value=0.01, value=200.0, step=10.0)
             weight = st.number_input("單位淨重 (kg)", min_value=0.0, value=1.0, step=0.1)
+            freight_per_kg_quick = st.number_input("運費 (台幣 / kg)", min_value=0.0, value=float(freight_per_kg), step=1.0, help="此商品專屬運費，不會覆蓋全局設定")
         with col2:
             name = st.text_input("品名（可留空）", placeholder="例如：保溫杯")
             import_tax = st.number_input("進口稅率 (%)", min_value=0.0, max_value=100.0, value=default_import_tax_pct, step=1.0)
@@ -167,11 +244,9 @@ if use_quick_calc:
             weight_buffer = st.slider("重量浮動範圍 (%)", min_value=-10, max_value=20, value=default_weight_buffer_pct)
             activity_discount = st.number_input("活動折扣金額 (NT$)", min_value=0, value=default_activity_discount, step=1)
             freight_absorption = st.radio("運費吸收方式", ["商品售價 × 6%", "固定 60 NT$"], index=0 if freight_absorption_method_global == "商品售價 × 6%" else 1)
-
         submitted = st.form_submit_button("🔍 立即計算")
 
     if submitted:
-        # 構造模擬 row
         mock_row = {
             '品號': sku.strip() if sku.strip() else f"AUTO-{datetime.now().strftime('%H%M%S')}",
             '品名': name.strip() if name.strip() else "未命名商品",
@@ -185,92 +260,28 @@ if use_quick_calc:
             '運費吸收方式': freight_absorption
         }
 
-        result = calculate_profit(mock_row)
-        if result:
+        result = calculate_profit(mock_row, freight_per_kg_quick)
+        if result is None:
+            st.error("❌ 售價或進價無效，請檢查輸入")
+        else:
             st.success("✅ 計算完成！")
 
-            # ———————— 新增：計算建議售價 ————————
-            def recommend_min_price_single(row, gross_margin_threshold, net_profit_threshold, gross_only=False):
-                try:
-                    cost_twd = float(row['最近進價'])
-                    weight_kg = float(row['單位淨重'])
-
-                    import_tax_rate = float(row['進口稅率(%)']) / 100
-                    excise_tax_rate = float(row['貨物稅率(%)']) / 100
-                    weight_buffer = float(row['重量浮動範圍(%)']) / 100
-                    activity_discount = float(row['活動折扣金額(NT$)'])
-
-                    import_tax = cost_twd * import_tax_rate
-                    excise_tax = (cost_twd + import_tax) * excise_tax_rate
-                    adjusted_weight = weight_kg * (1 + weight_buffer)
-                    freight_cost = adjusted_weight * freight_per_kg
-                    product_cost = cost_twd + import_tax + excise_tax + freight_cost
-
-                    if gross_only:
-                        gm_threshold = gross_margin_threshold / 100.0
-                        if gm_threshold >= 1.0 or gm_threshold <= 0:
-                            return None
-                        denom = 1.0 - gm_threshold
-                        if denom <= 0:
-                            return None
-                        min_price_excl_vat = product_cost / denom
-                        return round(min_price_excl_vat * 1.05, 2)
-
-                    else:
-                        packing_fixed = 15
-                        if row['運費吸收方式'] == "固定 60 NT$":
-                            freight_absorption_fixed = 60
-                            freight_absorption_ratio = 0.0
-                        else:
-                            freight_absorption_fixed = 0.0
-                            freight_absorption_ratio = 0.06 * 1.05  # 6% of incl-vat = 6.3% of excl-vat
-
-                        fixed_costs = packing_fixed + activity_discount + freight_absorption_fixed
-                        marketing_ratio = 0.10
-                        ad_ratio = 0.10
-                        shopee_equiv_ratio = 0.10 * 1.05  # 手續費基於含稅價
-
-                        total_variable_ratio = marketing_ratio + ad_ratio + freight_absorption_ratio + shopee_equiv_ratio
-
-                        gm_threshold = gross_margin_threshold / 100.0
-                        np_threshold = net_profit_threshold / 100.0
-
-                        price_for_gm = float('inf')
-                        if 0 <= gm_threshold < 1:
-                            denom_gm = 1.0 - gm_threshold
-                            if denom_gm > 0:
-                                price_for_gm = product_cost / denom_gm
-
-                        price_for_np = float('inf')
-                        denom_np = 1.0 - total_variable_ratio - np_threshold
-                        if denom_np > 0:
-                            price_for_np = (product_cost + fixed_costs) / denom_np
-
-                        min_price_excl_vat = max(price_for_gm, price_for_np)
-                        if min_price_excl_vat == float('inf'):
-                            return None
-                        return round(min_price_excl_vat * 1.05, 2)
-
-                except Exception:
-                    return None
-
-            recommended_price = recommend_min_price_single(
+            recommended_price = recommend_min_price(
                 mock_row,
                 abnormal_gross_margin_threshold,
                 abnormal_net_profit_threshold,
+                freight_per_kg_quick,
                 gross_only=use_gross_only_quick
             )
 
-            # ———————— 顯示結果卡片 ————————
             col_r1, col_r2, col_r3 = st.columns(3)
             with col_r1:
                 st.metric("毛利率", f"{result['毛利率(%)']:.2f}%")
             with col_r2:
                 st.metric("稅後淨利率", f"{result['稅後淨利率(%)']:.2f}%")
             with col_r3:
-                st.metric("狀態", result['狀態'], delta=None, delta_color="inverse" if result['狀態']=='異常' else "normal")
+                st.metric("狀態", result['狀態'], delta_color="inverse" if result['狀態']=='異常' else "normal")
 
-            # ———————— 建議售價提示 ————————
             if recommended_price is not None:
                 current_price = price
                 if current_price >= recommended_price:
@@ -281,7 +292,6 @@ if use_quick_calc:
             else:
                 st.warning("⚠️ 無法計算建議售價（參數可能導致無解）")
 
-            # ———————— 成本結構 ————————
             st.write("**詳細成本結構**")
             cost_df = pd.DataFrame([{
                 "項目": "商品成本",
@@ -298,6 +308,7 @@ if use_quick_calc:
             st.info(f"💡 **行動建議**：{result['行動建議']}")
 
     st.markdown("---")
+
 # ==============================
 # 上傳檔案
 # ==============================
@@ -494,69 +505,17 @@ if uploaded_file is not None:
         st.warning("⚠️ 沒有具備有效售價（>0）的商品，無法進行獲利分析。")
         st.stop()
 
-    # ———————— 核心計算函數 ————————
-    def calculate_profit(row):
-        retail_price_incl_vat = float(row['零售價'])  # 含稅售價（使用者輸入）
-        retail_price = retail_price_incl_vat / 1.05    # 不含稅售價（真正營收）
+    # ———————— 使用通用 calculate_profit 進行批量計算 ————————
+    def apply_calculate_profit(row):
+        res = calculate_profit(row.to_dict(), freight_per_kg)
+        if res is None:
+            return pd.Series({col: None for col in [
+                '品號', '品名', '零售價(TWD)', '商品成本(TWD)', '營業費用(TWD)',
+                '總成本(TWD)', '毛利率(%)', '稅後淨利率(%)', '狀態', '行動建議'
+            ]})
+        return pd.Series(res)
 
-        cost_twd = float(row['最近進價'])
-        weight_kg = float(row['單位淨重'])
-
-        import_tax_rate = float(row['進口稅率(%)']) / 100
-        excise_tax_rate = float(row['貨物稅率(%)']) / 100
-        weight_buffer = float(row['重量浮動範圍(%)']) / 100
-        activity_discount = float(row['活動折扣金額(NT$)'])
-
-        import_tax = cost_twd * import_tax_rate
-        excise_tax = (cost_twd + import_tax) * excise_tax_rate
-        adjusted_weight = weight_kg * (1 + weight_buffer)
-        freight_cost = adjusted_weight * freight_per_kg
-        product_cost = cost_twd + import_tax + excise_tax + freight_cost
-
-        # ===== 費用計算（關鍵：蝦皮手續費基於含稅售價，其餘基於不含稅營收）=====
-        packing_cost = 15
-        marketing_cost = retail_price * 0.10      # 基於不含稅
-        ad_cost = retail_price * 0.10             # 基於不含稅
-        shopee_fee = retail_price_incl_vat * 0.10 # 蝦皮手續費（基於含稅售價）
-        freight_absorption = retail_price_incl_vat * 0.06 if row['運費吸收方式'] == "商品售價 × 6%" else 60
-
-        operating_cost = (
-            packing_cost + marketing_cost + ad_cost +
-            shopee_fee + activity_discount + freight_absorption
-        )
-
-        gross_margin = (retail_price - product_cost) / retail_price if retail_price > 0 else 0
-        net_profit_amount = retail_price - product_cost - operating_cost
-        net_profit_rate = net_profit_amount / retail_price if retail_price > 0 else 0
-
-
-        gross_margin_pct = gross_margin * 100
-        net_profit_rate_pct = net_profit_rate * 100
-
-        is_abnormal = (gross_margin_pct < abnormal_gross_margin_threshold) or \
-                    (net_profit_rate_pct < abnormal_net_profit_threshold)
-        
-        if net_profit_amount < 0:
-            action = "建議淘汰"
-        elif is_abnormal:
-            action = "需壓降成本"
-        else:
-            action = "正常"
-
-        return pd.Series({
-            '品號': row['品號'],
-            '品名': row['品名'],
-            '零售價(TWD)': round(retail_price, 2),  # 顯示含稅價給使用者
-            '商品成本(TWD)': round(product_cost, 2),
-            '營業費用(TWD)': round(operating_cost, 2),
-            '總成本(TWD)': round(product_cost + operating_cost, 2),
-            '毛利率(%)': round(gross_margin_pct, 2),
-            '稅後淨利率(%)': round(net_profit_rate_pct, 2),
-            '狀態': '異常' if is_abnormal else '正常',
-            '行動建議': action
-        })
-
-    result_df = df_for_analysis.apply(calculate_profit, axis=1)
+    result_df = df_for_analysis.apply(apply_calculate_profit, axis=1)
 
     # ———————— 新增：標記並排序最近編輯商品（不新增欄位）——————
     # 在排序時直接用 set 判斷
